@@ -11,8 +11,11 @@ async fn main() -> io::Result<()> {
 
     let mut buffer = [0; 1500];
 
+    let mut offset = 2;
+
     while stream.read(&mut buffer).await.is_ok() {
-        println!("{buffer:?}");
+        println!("{:?}", &buffer[offset..(offset + 2)]);
+        offset += 8;
     }
 
     Ok(())
