@@ -5,5 +5,5 @@ edition = "2024"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-lame-sys = "0.3.3"
 chrono = "0.4.38"
+lame-sys = "0.1.2"

@@ -23,7 +23,7 @@ const TCP_READ_BUFFER_SIZE: usize = 4096;
 
 /// Encodes PCM samples to MP3 and saves to a timestamped file.
 async fn encode_and_save(
-    pcm_samples: &[i16],
+    pcm_samples: &mut [i16],
     sample_rate: u32,
     channels: u32,
     file_count: usize, // To make filenames sequential if timestamps are too close
@@ -56,7 +56,7 @@ async fn encode_and_save(
         lame_sys::lame_set_num_channels(lame, channels as std::os::raw::c_int);
 
         // Configure for CBR (Constant Bit Rate)
-        lame_sys::lame_set_VBR(lame, lame_sys::vbr_off); // Turn off VBR
+        lame_sys::lame_set_VBR(lame, lame_sys::vbr_default); // Turn off VBR
         lame_sys::lame_set_brate(lame, 128); // Set CBR bitrate to 128 kbps
 
         // Set encoding quality (0=best/slowest, 9=worst/fastest). 2 is high quality.
@@ -90,8 +90,8 @@ async fn encode_and_save(
         // Current setup assumes mono.
         lame_sys::lame_encode_buffer(
             lame,
-            pcm_samples.as_ptr(), // PCM data for the left channel (or mono channel)
-            std::ptr::null(),     // PCM data for the right channel (NULL for mono)
+            pcm_samples.as_mut_ptr(), // PCM data for the left channel (or mono channel)
+            pcm_samples.as_mut_ptr(), // PCM data for the left channel (or mono channel)
             num_samples_per_channel as std::os::raw::c_int,
             mp3_buffer.as_mut_ptr(),
             mp3_buffer_size as std::os::raw::c_int,
@@ -177,9 +177,13 @@ async fn main() -> io::Result<()> {
                         pcm_sample_collector.len()
                     );
                     file_counter += 1;
-                    if let Err(e) =
-                        encode_and_save(&pcm_sample_collector, SAMPLE_RATE, CHANNELS, file_counter)
-                            .await
+                    if let Err(e) = encode_and_save(
+                        &mut pcm_sample_collector,
+                        SAMPLE_RATE,
+                        CHANNELS,
+                        file_counter,
+                    )
+                    .await
                     {
                         eprintln!("Error encoding/saving remaining data: {}", e);
                     }
@@ -216,7 +220,7 @@ async fn main() -> io::Result<()> {
                 while pcm_sample_collector.len() >= SAMPLES_PER_FILE {
                     file_counter += 1;
                     // Drain the required number of samples from the collector
-                    let samples_for_this_file: Vec<i16> =
+                    let mut samples_for_this_file: Vec<i16> =
                         pcm_sample_collector.drain(..SAMPLES_PER_FILE).collect();
 
                     println!(
@@ -224,9 +228,13 @@ async fn main() -> io::Result<()> {
                         samples_for_this_file.len(),
                         file_counter
                     );
-                    if let Err(e) =
-                        encode_and_save(&samples_for_this_file, SAMPLE_RATE, CHANNELS, file_counter)
-                            .await
+                    if let Err(e) = encode_and_save(
+                        &mut samples_for_this_file,
+                        SAMPLE_RATE,
+                        CHANNELS,
+                        file_counter,
+                    )
+                    .await
                     {
                         eprintln!(
                             "Error during encoding/saving MP3 file #{}: {}",
@@ -247,9 +255,13 @@ async fn main() -> io::Result<()> {
                         pcm_sample_collector.len()
                     );
                     file_counter += 1;
-                    if let Err(save_err) =
-                        encode_and_save(&pcm_sample_collector, SAMPLE_RATE, CHANNELS, file_counter)
-                            .await
+                    if let Err(save_err) = encode_and_save(
+                        &mut pcm_sample_collector,
+                        SAMPLE_RATE,
+                        CHANNELS,
+                        file_counter,
+                    )
+                    .await
                     {
                         eprintln!(
                             "Error encoding/saving remaining data after read error: {}",
