@@ -11,10 +11,11 @@ async fn main() -> io::Result<()> {
 
     let mut buffer = [0; 1500];
 
-    let mut offset = 2;
+    let mut offset = 0;
 
     while stream.read(&mut buffer).await.is_ok() {
-        println!("{:?}", &buffer[offset..(offset + 2)]);
+        let audio_value = i16::from_le_bytes([buffer[offset], buffer[offset + 1]]);
+        println!("{}", audio_value);
         offset += 8;
     }
 
