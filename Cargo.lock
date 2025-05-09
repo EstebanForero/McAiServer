@@ -32,8 +32,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64",
  "chrono",
  "cpal",
+ "crossbeam-channel",
  "dotenv",
  "gemini-live-api",
  "lame-sys",
@@ -385,6 +387,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "crossbeam-channel"
+version = "0.5.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82b8f8f868b36967f9606790d1903570de9ceaf870a7bf9fbbd3016d636a2cb2"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-utils"
+version = "0.8.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
+
+[[package]]
 name = "crypto-common"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -567,9 +584,9 @@ dependencies = [
 
 [[package]]
 name = "gemini-live-api"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8909d97fd490c31bab58fd2ea7a46ef224c9767a2aa5a419fe368a3da2cef5d9"
+checksum = "8f0a095cb5b4be4b3edda58fe706431d6e31dcf5d34d406328e4b7ad64d3838d"
 dependencies = [
  "base64",
  "futures-util",

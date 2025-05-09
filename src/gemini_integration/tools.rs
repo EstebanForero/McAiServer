@@ -129,7 +129,7 @@ async fn get_weather(_state: Arc<GeminiAppState>, city: String) -> Result<String
 
 #[tool_function("Echoes back the provided text. Useful for testing.")]
 async fn echo_message(_state: Arc<GeminiAppState>, message: String) -> String {
-    info!("[Tool] 'echo_message' called with: \"{}\"", message);
+    println!("[Tool] 'echo_message' called with: \"{}\"", message);
     format!("Echo: \"{}\"", message)
 }
 

@@ -1,203 +1,216 @@
-use async_trait::async_trait;
+// src/audio_output/speaker_output.rs
+
+use anyhow::{Context, Result, anyhow};
 use cpal::{
+    SampleFormat, StreamConfig,
     traits::{DeviceTrait, HostTrait, StreamTrait},
-    SampleFormat, SampleRate, StreamConfig,
 };
-use tokio::sync::mpsc::{self, Receiver, Sender}; // Receiver needed for the thread
-use anyhow::{Result, Context, anyhow};
-use tracing::{info, error, debug}; // Removed unused warn
-use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
-use tokio::sync::Notify;
 use std::collections::VecDeque;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
+// Use crossbeam_channel for receiving AI audio
+use crossbeam_channel::Receiver as CrossbeamReceiver;
+use tracing::{error, info, warn}; // Added warn
 
-use super::AsyncAudioOutput;
+// Use the find_supported_config_generic from mic_input
+use crate::audio_input::mic_input::find_supported_config_generic;
+// Use the constants from gemini_integration
+use crate::gemini_integration::{AI_OUTPUT_CHANNELS, AI_OUTPUT_SAMPLE_RATE_HZ};
 
-const SPEAKER_BUFFER_TARGET_MS: usize = 200;
-
-pub struct SpeakerAudioOutput {
-    // Signal for the dedicated cpal std::thread to stop
-    thread_stop_notifier: Option<Arc<Notify>>,
-    // Join handle for the cpal std::thread
-    thread_join_handle: Option<std::thread::JoinHandle<()>>,
-    // Sender to send audio data TO the cpal std::thread
-    audio_data_sender_to_thread: Option<Sender<Vec<i16>>>,
+// This struct will now manage the CPAL stream and its thread.
+// It's not an `AsyncAudioOutput` anymore in the sense of returning a sender.
+// It's more like a utility that starts playback given a receiver.
+pub struct SpeakerPlayback {
+    // We don't strictly need to store the stream if we don't control it after creation,
+    // but it's good practice for explicit drop/pause if needed.
+    _cpal_stream: Option<cpal::Stream>, // Keep stream to ensure it's alive
+    // We might not need to store join_handle if we detach or manage thread lifecycle differently
+    // but for cleanup, it's good.
+    _thread_join_handle: Option<std::thread::JoinHandle<()>>,
 }
 
-impl SpeakerAudioOutput {
-    pub fn new() -> Self {
-        Self {
-            thread_stop_notifier: None,
-            thread_join_handle: None,
-            audio_data_sender_to_thread: None,
-        }
-    }
-}
+impl SpeakerPlayback {
+    // This function now mirrors `setup_audio_output` from the official example
+    pub fn new(ai_audio_receiver: CrossbeamReceiver<Vec<i16>>) -> Result<Self> {
+        let host = cpal::default_host();
+        let device = host
+            .default_output_device()
+            .ok_or_else(|| anyhow!("No default output device available"))?;
+        info!(
+            "[SpeakerPlayback] Using output device: {}",
+            device.name().unwrap_or_default()
+        );
 
-impl Drop for SpeakerAudioOutput {
-    fn drop(&mut self) {
-        if self.thread_join_handle.is_some() {
-            info!("Dropping SpeakerAudioOutput, ensuring cpal thread is stopped.");
-            // Dropping audio_data_sender_to_thread signals the thread's recv loop.
-            self.audio_data_sender_to_thread.take();
-            if let Some(notifier) = self.thread_stop_notifier.take() {
-                notifier.notify_one();
+        // Use AI_OUTPUT_SAMPLE_RATE_HZ and AI_OUTPUT_CHANNELS
+        let get_configs = || device.supported_output_configs();
+        let supported_config_desc = find_supported_config_generic(
+            get_configs,
+            AI_OUTPUT_SAMPLE_RATE_HZ, // Use the 24kHz constant
+            AI_OUTPUT_CHANNELS,       // Use the 1ch constant
+        );
+
+        let supported_config_desc = match supported_config_desc {
+            Ok(sc) => sc,
+            Err(e) => {
+                error!("[SpeakerPlayback] No suitable output config found: {}", e);
+                // Fallback or try f32 if i16 fails? For now, error out.
+                return Err(e.context("Finding supported speaker config"));
             }
-            if let Some(handle) = self.thread_join_handle.take() {
-                if let Err(e) = handle.join() {
-                    error!("Error joining cpal speaker output thread on drop: {:?}", e);
-                }
+        };
+
+        let final_config: StreamConfig = supported_config_desc.config();
+        let final_sample_format = supported_config_desc.sample_format();
+        info!(
+            "[SpeakerPlayback] Selected output config: {:?}, Format: {:?}",
+            final_config, final_sample_format
+        );
+
+        let err_fn = |err| error!("[SpeakerPlayback] CPAL audio output error: {}", err);
+
+        // Buffer for the CPAL callback. Size it based on AI_OUTPUT_SAMPLE_RATE_HZ.
+        // Official example uses a simple Vec, draining from it. Let's use VecDeque for efficiency.
+        let audio_buffer = Arc::new(Mutex::new(VecDeque::<i16>::new()));
+        let callback_should_stop = Arc::new(AtomicBool::new(false)); // To signal cpal callback
+
+        let stream_buffer_clone = audio_buffer.clone();
+        let callback_stop_clone = callback_should_stop.clone();
+
+        let stream = match final_sample_format {
+            SampleFormat::I16 => device.build_output_stream(
+                &final_config,
+                move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
+                    if callback_stop_clone.load(Ordering::Relaxed) {
+                        for sample in data.iter_mut() {
+                            *sample = 0;
+                        }
+                        return;
+                    }
+                    let mut buffer = stream_buffer_clone.lock().unwrap();
+                    for sample_out in data.iter_mut() {
+                        *sample_out = buffer.pop_front().unwrap_or(0); // Play silence on underrun
+                    }
+                },
+                err_fn,
+                None,
+            )?,
+            SampleFormat::F32 => device.build_output_stream(
+                &final_config,
+                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    if callback_stop_clone.load(Ordering::Relaxed) {
+                        for sample in data.iter_mut() {
+                            *sample = 0.0;
+                        }
+                        return;
+                    }
+                    let mut buffer = stream_buffer_clone.lock().unwrap();
+                    for sample_out in data.iter_mut() {
+                        *sample_out = buffer
+                            .pop_front()
+                            .map_or(0.0, |s_i16| s_i16 as f32 / i16::MAX as f32);
+                    }
+                },
+                err_fn,
+                None,
+            )?,
+            _ => {
+                return Err(anyhow!(
+                    "Unsupported sample format for speaker output: {:?}",
+                    final_sample_format
+                ));
             }
-        }
-    }
-}
+        };
 
-#[async_trait]
-impl AsyncAudioOutput for SpeakerAudioOutput {
-    async fn start_stream(&mut self, sample_rate: u32, channels: u16) -> Result<Sender<Vec<i16>>> {
-        if self.thread_join_handle.is_some() {
-            return Err(anyhow!("Speaker audio output stream already started"));
-        }
+        stream.play().context("Failed to play speaker stream")?;
+        info!(
+            "[SpeakerPlayback] CPAL stream playing with config: {:?}",
+            final_config
+        );
 
-        // This channel sends audio data from main app to the cpal thread
-        let (tx_to_cpal_thread, mut rx_from_main_app): (Sender<Vec<i16>>, Receiver<Vec<i16>>) = mpsc::channel(100);
-        self.audio_data_sender_to_thread = Some(tx_to_cpal_thread.clone()); // Keep a clone to return
-
-        let thread_stop_notifier_arc = Arc::new(Notify::new());
-        self.thread_stop_notifier = Some(thread_stop_notifier_arc.clone());
+        // Thread to receive audio from crossbeam channel and feed the Mutex<VecDeque>
+        // This thread is simpler than the previous forwarder + cpal thread.
+        let playback_thread_audio_buffer = audio_buffer.clone();
+        let playback_thread_should_stop = callback_should_stop.clone(); // Reuse stop signal
 
         let join_handle = std::thread::Builder::new()
-            .name("cpal-speaker-output-thread".into())
+            .name("speaker-playback-feed-thread".into())
             .spawn(move || {
-                let host = cpal::default_host();
-                let device = match host.default_output_device() {
-                    Some(d) => d,
-                    None => { error!("[cpal-speaker-thread] No default output device."); return; }
-                };
-                info!("[cpal-speaker-thread] Using output device: {}", device.name().unwrap_or_default());
-
-                // ... (config detection logic as in mic_input, for output configs) ...
-                 let mut supported_configs_range = match device.supported_output_configs() {
-                    Ok(r) => r, Err(e) => {error!("[cpal-speaker-thread] Err query output conf: {}", e); return; }
-                };
-                 let supported_config_desc = supported_configs_range.find(/*... find i16 or f32 ...*/).unwrap(); // placeholder
-                let final_config: StreamConfig = supported_config_desc.with_sample_rate(SampleRate(sample_rate)).config();
-                let final_sample_format = supported_config_desc.sample_format();
-                info!("[cpal-speaker-thread] Selected output config: {:?}, Format: {:?}", final_config, final_sample_format);
-
-
-                let err_fn = |err| error!("[cpal-speaker-thread] Audio output error: {}", err);
-
-                let samples_in_buffer = (sample_rate as usize * SPEAKER_BUFFER_TARGET_MS / 1000) * channels as usize;
-                let cpal_thread_audio_buffer = Arc::new(Mutex::new(VecDeque::<i16>::with_capacity(samples_in_buffer * 2)));
-                let callback_should_stop = Arc::new(AtomicBool::new(false));
-
-                let stream_buffer_clone = cpal_thread_audio_buffer.clone();
-                let callback_stop_clone = callback_should_stop.clone();
-
-                let stream_result = match final_sample_format {
-                    SampleFormat::I16 => device.build_output_stream(
-                        &final_config,
-                        move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
-                            if callback_stop_clone.load(Ordering::Relaxed) {
-                                for sample in data.iter_mut() { *sample = 0; } return;
-                            }
-                            let mut buffer = stream_buffer_clone.lock().unwrap();
-                            for sample_out in data.iter_mut() {
-                                *sample_out = buffer.pop_front().unwrap_or(0);
-                            }
-                        },
-                        err_fn, None),
-                    SampleFormat::F32 => device.build_output_stream(
-                        &final_config,
-                        move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                            if callback_stop_clone.load(Ordering::Relaxed) {
-                                for sample in data.iter_mut() { *sample = 0.0; } return;
-                            }
-                            let mut buffer = stream_buffer_clone.lock().unwrap();
-                            for sample_out in data.iter_mut() {
-                                *sample_out = buffer.pop_front().map_or(0.0, |s| s as f32 / i16::MAX as f32);
-                            }
-                        },
-                        err_fn, None),
-                    _ => { error!("[cpal-speaker-thread] Unsupported output format."); return; }
-                };
-                
-                let stream = match stream_result {
-                    Ok(s) => s, Err(e) => { error!("[cpal-speaker-thread] Failed to build output stream: {}", e); return; }
-                };
-                if let Err(e) = stream.play() { error!("[cpal-speaker-thread] Failed to play output: {}", e); return; }
-                info!("[cpal-speaker-thread] Speaker stream playing.");
-
-                // Loop to receive audio from main app and fill buffer
-                loop {
-                    tokio::runtime::Handle::current().block_on(async { // Need a way to run async recv in sync thread
-                        tokio::select! {
-                            biased;
-                            _ = thread_stop_notifier_arc.notified() => {
-                                // This branch will be taken when notify_one() is called
-                                debug!("[cpal-speaker-thread] Stop notifier was triggered.");
-                                // No action needed here, loop termination is handled by audio_chunk_option being None or outer logic
-                            }
-                            audio_chunk_option = rx_from_main_app.recv() => {
-                                match audio_chunk_option {
-                                    Some(pcm_samples) => {
-                                        let mut buffer = cpal_thread_audio_buffer.lock().unwrap();
-                                        if buffer.len() + pcm_samples.len() > buffer.capacity() {
-                                            // Simple overflow handling: drop new samples or oldest, here dropping oldest.
-                                            let space_needed = (buffer.len() + pcm_samples.len()) - buffer.capacity();
-                                            buffer.drain(..space_needed.min(buffer.len()));
-                                        }
-                                        buffer.extend(pcm_samples);
-                                    }
-                                    None => { // Sender (from main app) was dropped
-                                        info!("[cpal-speaker-thread] Audio data channel closed. Will play out buffer.");
-                                        // Set flag to break outer loop after this select! block
-                                        // No direct break here, allow one last check of notifier.
-                                    }
-                                }
-                            }
-                        }
-                    }); // end block_on
-
-                    // Check if the main sender is dropped or if notifier was hit explicitly for stopping
-                    if rx_from_main_app.is_closed() || thread_stop_notifier_arc.is_notified() { // is_notified is not a public method. Use AtomicBool
+                info!("[SpeakerPlaybackFeedThread] Started, waiting for AI audio...");
+                for received_samples in ai_audio_receiver {
+                    // Iterates until channel is disconnected
+                    if playback_thread_should_stop.load(Ordering::Relaxed) {
+                        info!("[SpeakerPlaybackFeedThread] Stop signaled, exiting.");
                         break;
                     }
+                    if received_samples.is_empty() {
+                        continue;
+                    }
+                    let mut buffer = playback_thread_audio_buffer.lock().unwrap();
+                    // Simple buffering strategy: just extend. Could add max size limit.
+                    buffer.extend(received_samples);
                 }
-                
-                // Wait for buffer to play out slightly or stop signal
-                info!("[cpal-speaker-thread] Main audio source ended. Waiting for buffer to play out...");
-                while cpal_thread_audio_buffer.lock().unwrap().len() > (sample_rate as usize / 10) { // Play until ~100ms left
-                    if thread_stop_notifier_arc.is_notified() { break; } // Fast exit if stop is signaled
-                     std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-
-                info!("[cpal-speaker-thread] Stopping speaker stream playback.");
-                callback_should_stop.store(true, Ordering::Relaxed);
-                // Stream is dropped when thread scope ends.
+                info!(
+                    "[SpeakerPlaybackFeedThread] Audio channel closed or stop signaled. Exiting."
+                );
+                // Signal cpal callback to stop filling with silence after buffer empties
+                playback_thread_should_stop.store(true, Ordering::Relaxed);
             })
-            .context("Failed to spawn cpal speaker output thread")?;
-        
-        self.thread_join_handle = Some(join_handle);
-        Ok(tx_to_cpal_thread) // Return the sender for the main app to send audio TO this cpal thread
+            .context("Failed to spawn speaker playback feed thread")?;
+
+        Ok(Self {
+            _cpal_stream: Some(stream),
+            _thread_join_handle: Some(join_handle),
+        })
     }
 
-    async fn stop_stream(&mut self) -> Result<()> {
-        // Dropping the sender will cause the recv() loop in the cpal thread to get None
-        self.audio_data_sender_to_thread.take(); 
-        
-        if let Some(notifier) = self.thread_stop_notifier.take() {
-            notifier.notify_one();
-            info!("Signaled cpal speaker output thread to stop.");
+    // Add a stop method if needed, or rely on Drop.
+    // For explicit cleanup:
+    pub fn stop(mut self) -> Result<()> {
+        if let Some(jh) = self._thread_join_handle.take() {
+            // The thread's stop logic relies on the ai_audio_receiver channel closing.
+            // The cpal_stream's callback stop is handled by callback_should_stop.
+            info!("[SpeakerPlayback] Stopping... (joining feed thread)");
+            jh.join()
+                .map_err(|e| anyhow!("Playback feed thread panic: {:?}", e))?;
+            info!("[SpeakerPlayback] Playback feed thread joined.");
         }
-        if let Some(handle) = self.thread_join_handle.take() {
-            info!("Waiting for cpal speaker output thread to join...");
-            match tokio::task::spawn_blocking(move || handle.join()).await {
-                Ok(Ok(())) => info!("CPAL speaker output thread joined successfully."),
-                Ok(Err(e)) => error!("CPAL speaker output thread panicked: {:?}", e),
-                Err(join_err) => error!("Failed to join CPAL speaker output thread: {}", join_err),
-            }
+        if let Some(stream) = self._cpal_stream.take() {
+            stream
+                .pause()
+                .context("Failed to pause cpal output stream on stop")?;
+            drop(stream); // Explicitly drop
+            info!("[SpeakerPlayback] CPAL stream stopped and dropped.");
         }
         Ok(())
+    }
+}
+
+// Implement Drop for SpeakerPlayback to ensure thread cleanup
+impl Drop for SpeakerPlayback {
+    fn drop(&mut self) {
+        info!("[SpeakerPlayback] Dropping SpeakerPlayback instance.");
+        // Stop logic: The playback_feed_thread will exit when its ai_audio_receiver is dropped (by GeminiAppState).
+        // The cpal callback uses an AtomicBool which should also be set if the thread sets it.
+        // We might want a more explicit stop signal here for the cpal callback if the stream
+        // is not paused/dropped explicitly.
+        if let Some(jh) = self._thread_join_handle.take() {
+            if !jh.is_finished() {
+                info!("[SpeakerPlayback Drop] Waiting for playback feed thread to join...");
+                jh.join()
+                    .map_err(|e| {
+                        warn!(
+                            "[SpeakerPlayback Drop] Playback feed thread panic on join: {:?}",
+                            e
+                        )
+                    })
+                    .ok();
+            }
+        }
+        if let Some(stream) = self._cpal_stream.take() {
+            info!("[SpeakerPlayback Drop] Pausing and dropping CPAL stream.");
+            stream.pause().ok(); // Best effort pause
+            drop(stream);
+        }
     }
 }
