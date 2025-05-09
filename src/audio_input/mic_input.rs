@@ -4,14 +4,13 @@ use cpal::{
     SampleFormat, SampleRate, StreamConfig,
     traits::{DeviceTrait, HostTrait, StreamTrait},
 };
+use std::sync::mpsc as StdMpsc;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use tokio::sync::mpsc::{self, Receiver as TokioReceiver}; // Renamed to avoid clash
+use tokio::sync::mpsc::{self, Receiver as TokioReceiver};
 use tracing::{debug, error, info, warn};
-// Use std::sync::mpsc for signaling the std::thread
-use std::sync::mpsc as StdMpsc;
 
 use super::AsyncAudioInput;
 
@@ -20,7 +19,7 @@ const SAMPLES_PER_CHUNK_TO_SEND: usize = 1600;
 pub struct MicAudioInput {
     sample_rate: u32,
     channels: u16,
-    stop_signal_sender: Option<StdMpsc::Sender<()>>, // To signal the std::thread
+    stop_signal_sender: Option<StdMpsc::Sender<()>>,
     thread_join_handle: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -46,7 +45,7 @@ impl Drop for MicAudioInput {
         if self.thread_join_handle.is_some() {
             info!("Dropping MicAudioInput, ensuring cpal thread is stopped.");
             if let Some(sender) = self.stop_signal_sender.take() {
-                let _ = sender.send(()); // Signal the thread to stop
+                let _ = sender.send(());
             }
             if let Some(handle) = self.thread_join_handle.take() {
                 if let Err(e) = handle.join() {
@@ -69,7 +68,6 @@ impl AsyncAudioInput for MicAudioInput {
     }
 
     async fn start_stream(&mut self) -> Result<TokioReceiver<Vec<i16>>> {
-        // Return TokioReceiver
         if self.thread_join_handle.is_some() {
             return Err(anyhow!("Microphone audio stream already started"));
         }
@@ -120,7 +118,7 @@ impl AsyncAudioInput for MicAudioInput {
 
                 let err_fn = |err| error!("[cpal-mic-thread] Audio input stream error: {}", err);
 
-                let callback_should_stop = Arc::new(AtomicBool::new(false)); // For the cpal callback
+                let callback_should_stop = Arc::new(AtomicBool::new(false));
 
                 let stream_tx_tokio = tx_audio_chunks_tokio;
                 let mut pcm_buffer = Vec::with_capacity(SAMPLES_PER_CHUNK_TO_SEND);
@@ -138,10 +136,7 @@ impl AsyncAudioInput for MicAudioInput {
                                 let chunk: Vec<i16> =
                                     pcm_buffer.drain(..SAMPLES_PER_CHUNK_TO_SEND).collect();
                                 if stream_tx_tokio.try_send(chunk).is_err() {
-                                    // Don't log excessively in callback, can cause issues.
-                                    // Consider setting a flag for the outer thread to log.
-                                    // debug!("[cpal-mic-callback] Channel closed or full.");
-                                    callback_stop_clone.store(true, Ordering::Relaxed); // Stop processing
+                                    callback_stop_clone.store(true, Ordering::Relaxed);
                                     return;
                                 }
                             }
@@ -193,7 +188,6 @@ impl AsyncAudioInput for MicAudioInput {
                 }
                 info!("[cpal-mic-thread] Microphone stream playing.");
 
-                // Wait for the stop signal from the main app
                 match stop_rx_std.recv() {
                     Ok(()) => info!("[cpal-mic-thread] Stop signal received."),
                     Err(_) => info!("[cpal-mic-thread] Stop signal channel disconnected."),
@@ -201,8 +195,7 @@ impl AsyncAudioInput for MicAudioInput {
 
                 info!("[cpal-mic-thread] Stopping microphone stream...");
                 callback_should_stop.store(true, Ordering::Relaxed);
-                // stream.pause().ok(); // Pause before drop
-                drop(stream); // Ensure stream is dropped and resources released by cpal
+                drop(stream);
                 info!("[cpal-mic-thread] Microphone thread finished.");
             })
             .context("Failed to spawn cpal mic input thread")?;
@@ -231,7 +224,6 @@ impl AsyncAudioInput for MicAudioInput {
     }
 }
 
-// Generic function to find supported config, from the example you provided
 pub fn find_supported_config_generic<F, I>(
     mut configs_iterator_fn: F,
     target_sample_rate: u32,
@@ -244,13 +236,11 @@ where
     let mut best_config: Option<cpal::SupportedStreamConfig> = None;
     let mut min_rate_diff = u32::MAX;
 
-    // Iterate through all supported configurations
     for config_range in configs_iterator_fn()? {
         if config_range.channels() != target_channels {
             continue;
         }
-        // Prefer i16, but could fall back to f32 if needed.
-        // The example logic prioritizes i16.
+
         if config_range.sample_format() != SampleFormat::I16 {
             continue;
         }
@@ -264,7 +254,6 @@ where
             } else if target_sample_rate < current_min_rate {
                 current_min_rate
             } else {
-                // target_sample_rate > current_max_rate
                 current_max_rate
             };
 
@@ -275,11 +264,10 @@ where
             best_config = Some(config_range.with_sample_rate(SampleRate(rate_to_check)));
         }
 
-        // If an exact match or the closest possible within a range is found.
         if rate_diff == 0
             && (target_sample_rate >= current_min_rate && target_sample_rate <= current_max_rate)
         {
-            break; // Perfect match
+            break;
         }
     }
 

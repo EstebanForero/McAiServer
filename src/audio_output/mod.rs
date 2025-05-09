@@ -5,8 +5,6 @@ use tokio::sync::mpsc::Sender;
 pub mod speaker_output;
 pub mod udp_output;
 
-/// A trait for asynchronous audio output sinks.
-/// Implementers will receive chunks of `Vec<i16>` (raw PCM samples) for playback or transmission.
 #[async_trait]
 pub trait AsyncAudioOutput: Send + Sync {
     /// Starts the audio output stream.

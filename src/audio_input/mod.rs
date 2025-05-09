@@ -7,7 +7,6 @@ pub mod tcp_input;
 
 #[async_trait]
 pub trait AsyncAudioInput: Send + Sync {
-    /// Starts the audio stream.
     /// Returns a `Receiver` that will yield chunks of PCM audio data (`Vec<i16>`).
     async fn start_stream(&mut self) -> Result<Receiver<Vec<i16>>>;
 

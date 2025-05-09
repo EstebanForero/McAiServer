@@ -1,20 +1,16 @@
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::mpsc::Receiver as TokioReceiver;
-// No longer need TokioSender for speaker if using crossbeam directly
-// use tokio::sync::mpsc::Sender as TokioSender;
-use tracing::{debug, error, info, warn};
+use tracing::{Level, debug, error, info, warn};
 
 mod audio_input;
-mod audio_output; // Keep for UDP if needed
+mod audio_output;
 mod config;
 mod gemini_integration;
 
 use audio_input::{AsyncAudioInput, mic_input::MicAudioInput, tcp_input::TcpAudioInput};
-// If UDP is still needed:
-use audio_output::{AsyncAudioOutput, udp_output::UdpAudioOutput};
-// Import the new SpeakerPlayback
 use audio_output::speaker_output::SpeakerPlayback;
+use audio_output::{AsyncAudioOutput, udp_output::UdpAudioOutput};
 
 use config::Config;
 use gemini_integration::{GeminiAppState, create_gemini_client};
@@ -22,14 +18,13 @@ use gemini_integration::{GeminiAppState, create_gemini_client};
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_max_level(Level::INFO)
         .with_target(true)
         .init();
 
     info!("🚀 Starting Gemini Voice Assistant...");
     let app_config = Config::from_env().expect("🚨 Failed to load configuration from .env");
 
-    // --- Initialize Audio Input Source ---
     let mut audio_input_source: Box<dyn AsyncAudioInput> =
         match app_config.audio_source.to_uppercase().as_str() {
             "TCP" => Box::new(TcpAudioInput::new(
@@ -47,21 +42,15 @@ async fn main() -> Result<()> {
             _ => return Err(anyhow::anyhow!("Invalid AUDIO_SOURCE.")),
         };
 
-    // --- Initialize Audio Output ---
-    // Crossbeam channel for AI audio playback (Gemini -> Speaker)
     let (ai_audio_tx_crossbeam, ai_audio_rx_crossbeam) =
         crossbeam_channel::bounded::<Vec<i16>>(100);
 
-    // This will hold the SpeakerPlayback instance if speaker output is chosen
     let mut _speaker_playback_manager: Option<SpeakerPlayback> = None;
-    // This will hold the UDP output sink if UDP output is chosen
     let mut _udp_output_sink: Option<Box<dyn AsyncAudioOutput>> = None;
 
     match app_config.audio_output_type.to_uppercase().as_str() {
         "SPEAKER" => {
             info!("🔊 Using Speaker audio output (via crossbeam channel).");
-            // SpeakerPlayback is given the receiver end of the AI audio channel.
-            // Gemini's audio will be sent to ai_audio_tx_crossbeam by handle_gemini_content.
             _speaker_playback_manager = Some(SpeakerPlayback::new(ai_audio_rx_crossbeam)?);
         }
         "UDP" => {
@@ -71,13 +60,6 @@ async fn main() -> Result<()> {
                 .expect("UDP_OUTPUT_ADDRESS missing");
             info!("🔊 Using UDP audio output to: {}", udp_addr);
             let mut sink = UdpAudioOutput::new(udp_addr);
-            // If using UDP for AI audio, GeminiAppState needs this sender.
-            // For now, let's assume UDP output is for something else or not primary for AI voice.
-            // If you want AI voice over UDP, you'd need to adapt GeminiAppState.
-            // For simplicity, let's assume UDP is for monitoring or a secondary stream for now.
-            // If you want AI audio over UDP, you'd need to pass a TokioSender to GeminiAppState for UDP
-            // and handle it in `handle_gemini_content` similar to how playback_sender was handled.
-            // The `start_stream` returns a TokioSender.
             let _udp_sender_for_other_audio = sink
                 .start_stream(app_config.audio_sample_rate, app_config.audio_channels)
                 .await?;
@@ -92,15 +74,14 @@ async fn main() -> Result<()> {
         _ => return Err(anyhow::anyhow!("Invalid AUDIO_OUTPUT_TYPE.")),
     }
 
-    // --- Initialize Gemini Client ---
     let initial_prompt = Some(
         "You are a voice-activated assistant. Please speak clearly and concisely. Use tools when appropriate. Respond with both text and speech.".to_string()
     );
-    // Pass the SENDER end of the crossbeam channel to Gemini client/state
+
     let mut gemini_client = create_gemini_client(
         &app_config,
         initial_prompt,
-        Some(ai_audio_tx_crossbeam.clone()), // Pass the sender
+        Some(ai_audio_tx_crossbeam.clone()),
     )
     .await?;
     let gemini_app_state_clone: Arc<GeminiAppState> = gemini_client.state();
@@ -113,7 +94,7 @@ async fn main() -> Result<()> {
     loop {
         tokio::select! {
             biased;
-            _ = tokio::signal::ctrl_c() => { /* ... shutdown ... */ break; }
+            _ = tokio::signal::ctrl_c() => { break; }
 
             audio_chunk_option = audio_chunk_receiver_tokio.recv() => {
                 match audio_chunk_option {
@@ -140,29 +121,22 @@ async fn main() -> Result<()> {
         }
     }
 
-    // --- Graceful Shutdown ---
     info!("🔌 Shutting down audio input source...");
     if let Err(e) = audio_input_source.stop_stream().await {
         error!("🚨 Error stopping audio input source: {}", e);
     }
 
-    // Shutdown SpeakerPlayback if it was created
-    if let Some(spm) = _speaker_playback_manager.take() {
+    if let Some(mut spm) = _speaker_playback_manager.take() {
         info!("🔌 Shutting down speaker playback manager...");
-        // The sender (ai_audio_tx_crossbeam) will be dropped when `gemini_app_state_clone` (and thus `gemini_client`) is dropped,
-        // or when this main scope ends if we drop our clone. This signals the SpeakerPlayback's feed thread to end.
-        drop(ai_audio_tx_crossbeam); // Explicitly drop our clone of the sender
+        drop(ai_audio_tx_crossbeam);
         if let Err(e) = spm.stop() {
-            // Call the explicit stop method
             error!("🚨 Error stopping speaker playback: {}", e);
         }
     }
 
-    // Shutdown UDP output if it was created
     if let Some(mut sink) = _udp_output_sink.take() {
         info!("🔌 Shutting down UDP audio output sink...");
         if let Err(e) = sink.stop_stream().await {
-            // Async stop
             error!("🚨 Error stopping UDP audio output sink: {}", e);
         }
     }

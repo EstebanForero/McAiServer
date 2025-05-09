@@ -39,7 +39,6 @@ impl AsyncAudioOutput for UdpAudioOutput {
             return Err(anyhow!("UDP audio output stream already started"));
         }
 
-        // Bind to a local port for sending. 0 means OS picks an available port.
         let local_addr = "0.0.0.0:0";
         let socket = UdpSocket::bind(local_addr)
             .await
@@ -49,9 +48,6 @@ impl AsyncAudioOutput for UdpAudioOutput {
             self.target_address
         );
 
-        // It's important to connect the UDP socket if you're only sending to one address.
-        // This allows `send` to be used instead of `send_to` and can be more efficient.
-        // It also helps with ICMP "port unreachable" errors on some OSes.
         socket
             .connect(&self.target_address)
             .await
@@ -64,7 +60,7 @@ impl AsyncAudioOutput for UdpAudioOutput {
         info!("UDP socket connected to target {}", self.target_address);
 
         self.socket = Some(Arc::new(socket));
-        let socket_clone = self.socket.clone().unwrap(); // Safe due to above assignment
+        let socket_clone = self.socket.clone().unwrap();
 
         let (tx_audio_out, mut rx_audio_out): (Sender<Vec<i16>>, Receiver<Vec<i16>>) =
             mpsc::channel(100);
@@ -84,7 +80,6 @@ impl AsyncAudioOutput for UdpAudioOutput {
                                 if pcm_samples.is_empty() {
                                     continue;
                                 }
-                                // Convert i16 samples to Vec<u8> (little-endian)
                                 let mut byte_buffer = Vec::with_capacity(pcm_samples.len() * 2);
                                 for sample in pcm_samples {
                                     byte_buffer.extend_from_slice(&sample.to_le_bytes());
@@ -96,7 +91,6 @@ impl AsyncAudioOutput for UdpAudioOutput {
                                     }
                                     Err(e) => {
                                         error!("Failed to send audio data via UDP: {}", e);
-                                        // Optionally, break or implement retry logic
                                     }
                                 }
                             }
@@ -125,7 +119,7 @@ impl AsyncAudioOutput for UdpAudioOutput {
             info!("UDP audio output stream processing shut down.");
         }
         if let Some(socket) = self.socket.take() {
-            drop(socket); // Close the socket
+            drop(socket);
         }
         Ok(())
     }
