@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc::Sender;
 
 pub mod speaker_output;
+pub mod tcp_output;
 pub mod udp_output;
 
 #[async_trait]
