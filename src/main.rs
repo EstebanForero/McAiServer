@@ -45,13 +45,16 @@ async fn main() -> Result<()> {
     let (ai_audio_tx_crossbeam, ai_audio_rx_crossbeam) =
         crossbeam_channel::bounded::<Vec<i16>>(100);
 
+    let gemini_app_state_playback_sender: Option<crossbeam_channel::Sender<Vec<i16>>>;
+
     let mut _speaker_playback_manager: Option<SpeakerPlayback> = None;
-    let mut _udp_output_sink: Option<Box<dyn AsyncAudioOutput>> = None;
+    let mut udp_audio_output_module: Option<UdpAudioOutput> = None;
 
     match app_config.audio_output_type.to_uppercase().as_str() {
         "SPEAKER" => {
             info!("🔊 Using Speaker audio output (via crossbeam channel).");
             _speaker_playback_manager = Some(SpeakerPlayback::new(ai_audio_rx_crossbeam)?);
+            gemini_app_state_playback_sender = Some(ai_audio_tx_crossbeam);
         }
         "UDP" => {
             let udp_addr = app_config
@@ -59,17 +62,24 @@ async fn main() -> Result<()> {
                 .clone()
                 .expect("UDP_OUTPUT_ADDRESS missing");
             info!("🔊 Using UDP audio output to: {}", udp_addr);
-            let mut sink = UdpAudioOutput::new(udp_addr);
-            let _udp_sender_for_other_audio = sink
-                .start_stream(app_config.audio_sample_rate, app_config.audio_channels)
-                .await?;
-            _udp_output_sink = Some(Box::new(sink));
-            warn!(
-                "UDP output is configured, but AI voice will go to speaker if SPEAKER is also chosen or by default. Ensure `ai_audio_playback_sender` in `GeminiAppState` points to the correct sink if UDP is primary for AI voice."
-            );
+            let mut udp_module = UdpAudioOutput::new(udp_addr);
+
+            udp_module
+                .start_with_crossbeam_receiver(
+                    ai_audio_rx_crossbeam,
+                    app_config.audio_sample_rate,
+                    app_config.audio_channels,
+                )
+                .await
+                .expect("Failed to start UDP output with Crossbeam receiver");
+
+            udp_audio_output_module = Some(udp_module);
+
+            gemini_app_state_playback_sender = Some(ai_audio_tx_crossbeam.clone());
         }
         "NONE" | "" => {
             info!("🔇 Audio output is disabled.");
+            gemini_app_state_playback_sender = None;
         }
         _ => return Err(anyhow::anyhow!("Invalid AUDIO_OUTPUT_TYPE.")),
     }
@@ -81,7 +91,7 @@ async fn main() -> Result<()> {
     let mut gemini_client = create_gemini_client(
         &app_config,
         initial_prompt,
-        Some(ai_audio_tx_crossbeam.clone()),
+        gemini_app_state_playback_sender,
     )
     .await?;
     let gemini_app_state_clone: Arc<GeminiAppState> = gemini_client.state();
@@ -128,15 +138,15 @@ async fn main() -> Result<()> {
 
     if let Some(mut spm) = _speaker_playback_manager.take() {
         info!("🔌 Shutting down speaker playback manager...");
-        drop(ai_audio_tx_crossbeam);
         if let Err(e) = spm.stop() {
             error!("🚨 Error stopping speaker playback: {}", e);
         }
     }
 
-    if let Some(mut sink) = _udp_output_sink.take() {
-        info!("🔌 Shutting down UDP audio output sink...");
-        if let Err(e) = sink.stop_stream().await {
+    if let Some(mut udp_module) = udp_audio_output_module.take() {
+        info!("🔌 Shutting down UDP audio output (direct Crossbeam consumer)...");
+
+        if let Err(e) = udp_module.stop_stream_processing().await {
             error!("🚨 Error stopping UDP audio output sink: {}", e);
         }
     }
