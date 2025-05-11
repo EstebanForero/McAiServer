@@ -23,14 +23,16 @@ pub struct GeminiAppState {
     pub current_turn_text: Arc<StdMutex<String>>,
     pub turn_complete_signal: Arc<Notify>,
     pub ai_audio_playback_sender: Option<Arc<CrossbeamSender<Vec<i16>>>>,
+    pub backend_url: String,
 }
 
 impl GeminiAppState {
-    pub fn new(playback_sender: Option<CrossbeamSender<Vec<i16>>>) -> Self {
+    pub fn new(playback_sender: Option<CrossbeamSender<Vec<i16>>>, backend_url: String) -> Self {
         Self {
             current_turn_text: Arc::new(StdMutex::new(String::new())),
             turn_complete_signal: Arc::new(Notify::new()),
             ai_audio_playback_sender: playback_sender.map(Arc::new),
+            backend_url,
         }
     }
 }
@@ -133,7 +135,10 @@ pub async fn create_gemini_client(
     initial_prompt_text: Option<String>,
     ai_audio_playback_sender: Option<CrossbeamSender<Vec<i16>>>,
 ) -> Result<GeminiLiveClient<GeminiAppState>> {
-    let gemini_app_state = GeminiAppState::new(ai_audio_playback_sender);
+    let gemini_app_state = GeminiAppState::new(
+        ai_audio_playback_sender,
+        app_config.backend_url.clone().unwrap(),
+    );
 
     info!(
         "Configuring Gemini Live Client for model: {}",

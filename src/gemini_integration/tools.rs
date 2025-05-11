@@ -1,129 +1,52 @@
 use gemini_live_api::{GeminiLiveClientBuilder, tool_function};
-use reqwest;
-use serde::Deserialize;
+use reqwest::{Method, Url};
+use serde::Serialize;
+use serde_json::json;
 use std::sync::Arc;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use super::GeminiAppState;
 
-#[derive(Deserialize, Debug)]
-struct WeatherApiResponse {
-    main: Option<WeatherMain>,
-    weather: Option<Vec<WeatherDescription>>,
-    name: Option<String>,
-    cod: Option<serde_json::Value>,
-    message: Option<String>,
-}
-#[derive(Deserialize, Debug)]
-struct WeatherMain {
-    temp: f32,
-    feels_like: f32,
-    humidity: u32,
-}
-#[derive(Deserialize, Debug)]
-struct WeatherDescription {
-    description: String,
-}
-
 #[tool_function("Fetches the current weather for a specified city. Uses OpenWeatherMap.")]
-async fn get_weather(_state: Arc<GeminiAppState>, city: String) -> Result<String, String> {
-    info!("[Tool] 'get_weather' called for city: {}", city);
+async fn get_weather(state: Arc<GeminiAppState>, city: String) -> Result<String, String> {
+    let response = reqwest::get(&state.backend_url).await.map_err(|err| {
+        error!("Error calling backend endpoint: {}", err);
+        err.to_string()
+    })?;
 
-    let openweathermap_api_key = std::env::var("OPENWEATHERMAP_API_KEY").ok();
+    let text_response = response.text().await.map_err(|err| {
+        error!("Error converting response to text: {err}");
+        err.to_string()
+    })?;
 
-    if openweathermap_api_key.is_none()
-        || openweathermap_api_key.as_deref() == Some("")
-        || openweathermap_api_key.as_deref() == Some("YOUR_OPENWEATHERMAP_API_KEY")
-    {
-        warn!(
-            "[Tool] OPENWEATHERMAP_API_KEY not set or is placeholder. Mocking weather response for '{}'.",
-            city
-        );
-        return Ok(format!(
-            "Mock weather for {}: Sunny, 22°C. Please set a real OPENWEATHERMAP_API_KEY for live data.",
-            city
-        ));
+    Ok(text_response)
+}
+
+#[tool_function("Post example")]
+async fn post_example(state: Arc<GeminiAppState>, city: String) -> Result<String, String> {
+    let client = reqwest::Client::new();
+
+    #[derive(Serialize)]
+    struct City {
+        city_name: String,
     }
-    let api_key = openweathermap_api_key.unwrap();
 
-    let url = format!(
-        "https://api.openweathermap.org/data/2.5/weather?q={}&appid={}&units=metric",
-        city, api_key
-    );
+    let res = client
+        .post(&state.backend_url)
+        .json(&City { city_name: city })
+        .send()
+        .await
+        .map_err(|err| {
+            error!("Error sending post example: {err}");
+            err.to_string()
+        })?;
 
-    match reqwest::get(&url).await {
-        Ok(response) => {
-            let status = response.status();
-            if status.is_success() {
-                match response.json::<WeatherApiResponse>().await {
-                    Ok(data) => {
-                        if data.cod.is_some()
-                            && data
-                                .cod
-                                .as_ref()
-                                .unwrap_or(&serde_json::Value::Null)
-                                .as_str()
-                                == Some("404")
-                        {
-                            let err_msg = format!(
-                                "City '{}' not found by weather API. Message: {:?}",
-                                city,
-                                data.message.unwrap_or_default()
-                            );
-                            error!("[Tool Error] {}", err_msg);
-                            return Err(err_msg);
-                        }
+    let text = res.text().await.map_err(|err| {
+        error!("Error converting response to text: {err}");
+        err.to_string()
+    })?;
 
-                        let city_name = data.name.unwrap_or_else(|| city.clone());
-                        let temp = data
-                            .main
-                            .as_ref()
-                            .map_or("N/A".to_string(), |m| format!("{:.1}", m.temp));
-                        let feels_like = data
-                            .main
-                            .as_ref()
-                            .map_or("N/A".to_string(), |m| format!("{:.1}", m.feels_like));
-                        let humidity = data
-                            .main
-                            .as_ref()
-                            .map_or("N/A".to_string(), |m| m.humidity.to_string());
-                        let description = data
-                            .weather
-                            .as_ref()
-                            .and_then(|w| w.first())
-                            .map_or("N/A", |d| &d.description);
-
-                        Ok(format!(
-                            "Current weather in {}: Temperature is {}°C (feels like {}°C), with {}% humidity. Conditions: {}.",
-                            city_name, temp, feels_like, humidity, description
-                        ))
-                    }
-                    Err(e) => {
-                        let err_msg = format!(
-                            "Failed to parse weather JSON response for '{}': {}",
-                            city, e
-                        );
-                        error!("[Tool Error] {}", err_msg);
-                        Err(err_msg)
-                    }
-                }
-            } else {
-                let err_msg = format!(
-                    "Weather API request for '{}' failed with status: {}. Body: {:?}",
-                    city,
-                    status,
-                    response.text().await.unwrap_or_default()
-                );
-                error!("[Tool Error] {}", err_msg);
-                Err(err_msg)
-            }
-        }
-        Err(e) => {
-            let err_msg = format!("Network error fetching weather for '{}': {}", city, e);
-            error!("[Tool Error] {}", err_msg);
-            Err(err_msg)
-        }
-    }
+    Ok(text)
 }
 
 #[tool_function("Echoes back the provided text. Useful for testing.")]

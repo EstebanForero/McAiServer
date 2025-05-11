@@ -10,7 +10,7 @@ pub struct Config {
     pub tcp_server_address: Option<String>,
     pub audio_output_type: String,
     pub udp_output_address: Option<String>,
-    pub openweathermap_api_key: Option<String>,
+    pub backend_url: Option<String>,
 }
 
 impl Config {
@@ -38,7 +38,7 @@ impl Config {
             env::var("AUDIO_OUTPUT_TYPE").unwrap_or_else(|_| "SPEAKER".to_string());
         let udp_output_address = env::var("UDP_OUTPUT_ADDRESS").ok();
 
-        let openweathermap_api_key = env::var("OPENWEATHERMAP_API_KEY").ok();
+        let backend_url = env::var("BACKEND_URL").ok();
 
         if audio_source.to_uppercase() == "TCP" && tcp_server_address.is_none() {
             return Err(anyhow::anyhow!(
@@ -73,7 +73,7 @@ impl Config {
             tcp_server_address,
             audio_output_type,
             udp_output_address,
-            openweathermap_api_key,
+            backend_url,
         })
     }
 }
