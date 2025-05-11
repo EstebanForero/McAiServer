@@ -65,7 +65,7 @@ async fn handle_gemini_content(ctx: ServerContentContext, app_state: Arc<GeminiA
             }
             if let Some(blob) = &part.inline_data {
                 if blob.mime_type.starts_with("audio/") {
-                    info!(
+                    debug!(
                         "[Handler] Received audio blob from Gemini (mime_type: {}). Decoding...",
                         blob.mime_type
                     );
@@ -109,7 +109,7 @@ async fn handle_gemini_content(ctx: ServerContentContext, app_state: Arc<GeminiA
         }
     }
     if let Some(transcription) = &ctx.content.output_transcription {
-        info!(
+        debug!(
             "[Handler] Model Output Transcription: {}",
             transcription.text
         );

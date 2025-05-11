@@ -189,7 +189,7 @@ impl AsyncAudioInput for MicAudioInput {
                 info!("[cpal-mic-thread] Microphone stream playing.");
 
                 match stop_rx_std.recv() {
-                    Ok(()) => info!("[cpal-mic-thread] Stop signal received."),
+                    Ok(()) => debug!("[cpal-mic-thread] Stop signal received."),
                     Err(_) => info!("[cpal-mic-thread] Stop signal channel disconnected."),
                 }
 
