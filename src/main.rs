@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use crossbeam_channel::Sender as CrossbeamSender;
-use std::sync::Arc;
-use tokio::sync::mpsc::Receiver as TokioReceiver;
+use std::{fs, sync::Arc};
+use tokio::{io, sync::mpsc::Receiver as TokioReceiver};
 use tracing::{Level, debug, error, info, warn};
 
 mod audio_input;
@@ -11,30 +11,33 @@ mod gemini_integration;
 
 use audio_input::{
     AsyncAudioInput, mic_input::MicAudioInput, tcp_input::TcpAudioInput as MicTcpInput,
-}; // Renamed for clarity
-// Use the new TcpAudioOutput for speaker
+};
 use audio_output::{speaker_output::SpeakerPlayback, tcp_output::TcpAudioOutput}; // <<< CHANGED
-// AsyncAudioOutput trait is still here.
-// use audio_output::AsyncAudioOutput; // Not strictly needed if we don't store TcpAudioOutput as Box<dyn...>
 
 use config::Config;
 use gemini_integration::{GeminiAppState, create_gemini_client};
 
+fn get_initial_prompt() -> Option<String> {
+    let file: Option<String> = fs::read("prompt.txt")
+        .ok()
+        .map(|file| String::from_utf8_lossy(&file).to_string());
+
+    file
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_max_level(Level::INFO) // Set to DEBUG to see more logs
+        .with_max_level(Level::INFO)
         .with_target(true)
         .init();
 
     info!("🚀 Starting Gemini Voice Assistant...");
     let app_config = Config::from_env().expect("🚨 Failed to load configuration from .env");
 
-    // Audio Input (ESP32 Mic -> Rust TCP Client) - Unchanged
     let mut audio_input_source: Box<dyn AsyncAudioInput> =
         match app_config.audio_source.to_uppercase().as_str() {
             "TCP" => Box::new(MicTcpInput::new(
-                // ESP32 Mic is a TCP Server, Rust is TCP Client
                 app_config
                     .tcp_server_address
                     .clone()
@@ -49,15 +52,13 @@ async fn main() -> Result<()> {
             _ => return Err(anyhow::anyhow!("Invalid AUDIO_SOURCE.")),
         };
 
-    // This Crossbeam channel is where Gemini sends its audio output
     let (ai_audio_tx_crossbeam, ai_audio_rx_crossbeam) =
         crossbeam_channel::bounded::<Vec<i16>>(100);
 
     let gemini_app_state_playback_sender: Option<CrossbeamSender<Vec<i16>>>;
 
     let mut _speaker_playback_manager: Option<SpeakerPlayback> = None;
-    // Store the TcpAudioOutput instance directly
-    let mut tcp_audio_output_module: Option<TcpAudioOutput> = None; // <<< CHANGED from Udp
+    let mut tcp_audio_output_module: Option<TcpAudioOutput> = None;
 
     match app_config.audio_output_type.to_uppercase().as_str() {
         "SPEAKER" => {
@@ -78,19 +79,17 @@ async fn main() -> Result<()> {
 
             let mut tcp_module = TcpAudioOutput::new(esp32_speaker_tcp_addr);
 
-            // Start the TcpAudioOutput, giving it the receiver end of the crossbeam channel
             tcp_module
                 .start_with_crossbeam_receiver(
-                    ai_audio_rx_crossbeam,        // Audio from Gemini
-                    app_config.audio_sample_rate, // Or AI_OUTPUT_SAMPLE_RATE_HZ
-                    app_config.audio_channels,    // Or AI_OUTPUT_CHANNELS
+                    ai_audio_rx_crossbeam,
+                    app_config.audio_sample_rate,
+                    app_config.audio_channels,
                 )
                 .await
                 .context("Failed to start TCP output (to ESP32 Speaker) with Crossbeam receiver")?;
 
-            tcp_audio_output_module = Some(tcp_module); // Store the instance
+            tcp_audio_output_module = Some(tcp_module);
 
-            // GeminiAppState will send to this sender. TcpAudioOutput now directly receives from ai_audio_rx_crossbeam.
             gemini_app_state_playback_sender = Some(ai_audio_tx_crossbeam.clone());
 
             info!(
@@ -108,9 +107,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    let initial_prompt = Some(
-        "You are a voice-activated assistant. Please speak clearly and concisely. Use tools when appropriate. Respond with both text and speech.".to_string()
-    );
+    let initial_prompt = get_initial_prompt();
 
     let mut gemini_client = create_gemini_client(
         &app_config,
@@ -126,7 +123,6 @@ async fn main() -> Result<()> {
     info!("🗣️  Assistant is now listening. Press Ctrl+C to exit.");
 
     loop {
-        // Main application loop
         tokio::select! {
             biased;
             _ = tokio::signal::ctrl_c() => {
