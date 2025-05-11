@@ -167,7 +167,7 @@ pub async fn create_gemini_client(
     });
     builder = builder.output_audio_transcription(AudioTranscriptionConfig {});
     let system_message = initial_prompt_text.unwrap_or_else(||
-        "Eres un asistente, que recive ordenes para un McDonalds, que envia datos de las ordenes con la echo tool, en json".to_string()
+        "Eres un asistente que solo habla en espanol, que recive ordenes para un McDonalds, que envia datos de las ordenes con la echo tool, en json".to_string()
     );
     info!("Using system instruction: \"{}\"", system_message);
     builder = builder.system_instruction(Content {
