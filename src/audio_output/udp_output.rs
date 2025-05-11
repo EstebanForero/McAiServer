@@ -1,21 +1,20 @@
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
+use crossbeam_channel::Receiver as CrossbeamReceiver;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::Notify;
-// We are removing the tokio::mpsc imports for the data channel
-use crossbeam_channel::Receiver as CrossbeamReceiver; // << NEW: To receive audio
 use tracing::{debug, error, info, warn};
 
-// We might not perfectly fit this trait anymore if we change how UdpAudioOutput gets its data.
-// Let's keep it for now and see, or decide to remove it for UdpAudioOutput.
 use super::AsyncAudioOutput;
-use tokio::sync::mpsc::Sender as TokioSender; // Still needed for trait, even if unused
+use tokio::sync::mpsc::Sender as TokioSender;
+
+// Define a reasonable max payload size for UDP packets
+const MAX_UDP_PAYLOAD_BYTES: usize = 1400; // Approx 700 i16 samples
+// const MAX_SAMPLES_PER_UDP_PACKET: usize = MAX_UDP_PAYLOAD_BYTES / 2;
 
 pub struct UdpAudioOutput {
     target_address: String,
-    // No internal tokio mpsc Sender/Receiver for audio data anymore.
-    // The UdpSocket will be created and managed by the processing task.
     stop_signal: Arc<Notify>,
     stream_task_handle: Option<tokio::task::JoinHandle<()>>,
 }
@@ -29,11 +28,9 @@ impl UdpAudioOutput {
         }
     }
 
-    // New method to start the stream with a CrossbeamReceiver
     pub async fn start_with_crossbeam_receiver(
         &mut self,
-        audio_rx: CrossbeamReceiver<Vec<i16>>, // Audio comes from this channel
-        // sample_rate and channels can be passed if needed for logging or future use
+        audio_rx: CrossbeamReceiver<Vec<i16>>,
         _sample_rate: u32,
         _channels: u16,
     ) -> Result<()> {
@@ -43,7 +40,7 @@ impl UdpAudioOutput {
             ));
         }
 
-        let local_addr = "0.0.0.0:0"; // Bind to any available local port
+        let local_addr = "0.0.0.0:0";
         let socket = UdpSocket::bind(local_addr)
             .await
             .with_context(|| format!("[UDP_XBeam] Failed to bind UDP socket to {}", local_addr))?;
@@ -52,7 +49,6 @@ impl UdpAudioOutput {
             self.target_address
         );
 
-        // Connect to the target address. This sets the default destination for `send`.
         socket
             .connect(&self.target_address)
             .await
@@ -67,65 +63,84 @@ impl UdpAudioOutput {
             self.target_address
         );
 
-        let socket_arc = Arc::new(socket); // Share the socket with the task
+        let socket_arc = Arc::new(socket);
         let local_stop_signal = self.stop_signal.clone();
-        let target_addr_clone = self.target_address.clone(); // For logging within the task
+        let target_addr_clone = self.target_address.clone();
 
         let task = tokio::spawn(async move {
             info!(
-                "[UDP_XBeam_Worker->{}] Started. Waiting for audio from CrossbeamReceiver...",
-                target_addr_clone
+                "[UDP_XBeam_Worker->{}] Started. Max UDP payload: {} bytes. Waiting for audio...",
+                target_addr_clone, MAX_UDP_PAYLOAD_BYTES
             );
             loop {
-                // We need to wait for either a stop signal or new audio.
-                // crossbeam_channel::recv() is blocking.
                 let recv_result: Result<Option<Vec<i16>>, tokio::task::JoinError> =
                     tokio::task::spawn_blocking({
-                        let audio_rx_clone = audio_rx.clone(); // Clone for the blocking task
-                        move || audio_rx_clone.recv().ok() // .ok() converts RecvError (channel closed) to None
+                        let audio_rx_clone = audio_rx.clone();
+                        move || audio_rx_clone.recv().ok()
                     })
                     .await;
 
                 tokio::select! {
-                    biased; // Prioritize stop signal
-
+                    biased;
                     _ = local_stop_signal.notified() => {
-                        info!("[UDP_XBeam_Worker->{}] Stop signal received. Exiting.", target_addr_clone);
+                        info!("[UDP_XBeam_Worker->{}] Stop signal. Exiting.", target_addr_clone);
                         break;
                     }
-
-                    // Process the outcome of the blocking receive operation
                     audio_option = async { recv_result } => {
                         match audio_option {
-                            Ok(Some(pcm_samples)) => { // Successfully received audio
+                            Ok(Some(pcm_samples)) => {
                                 if pcm_samples.is_empty() {
-                                    debug!("[UDP_XBeam_Worker->{}] Received empty PCM samples from Crossbeam, skipping.", target_addr_clone);
+                                    debug!("[UDP_XBeam_Worker->{}] Empty PCM samples, skipping.", target_addr_clone);
                                     continue;
                                 }
-                                debug!("[UDP_XBeam_Worker->{}] Received {} samples from Crossbeam. Preparing to send.", target_addr_clone, pcm_samples.len());
+                                debug!("[UDP_XBeam_Worker->{}] Received {} samples. Chunking for UDP.", target_addr_clone, pcm_samples.len());
 
-                                let mut byte_buffer = Vec::with_capacity(pcm_samples.len() * 2);
-                                for sample in pcm_samples { // Iterate by value is fine if pcm_samples is owned
-                                    byte_buffer.extend_from_slice(&sample.to_le_bytes());
+                                // Convert Vec<i16> to Vec<u8> (little-endian)
+                                let mut full_byte_buffer = Vec::with_capacity(pcm_samples.len() * 2);
+                                for sample in pcm_samples {
+                                    full_byte_buffer.extend_from_slice(&sample.to_le_bytes());
                                 }
 
-                                info!("[UDP_XBeam_Worker->{}] Sending {} bytes ({} samples) via UDP.", target_addr_clone, byte_buffer.len(), byte_buffer.len() / 2);
-                                match socket_arc.send(&byte_buffer).await {
-                                    Ok(bytes_sent) => {
-                                        debug!("[UDP_XBeam_Worker->{}] Sent {} bytes via UDP.", target_addr_clone, bytes_sent);
+                                // Send the byte buffer in chunks
+                                for chunk in full_byte_buffer.chunks(MAX_UDP_PAYLOAD_BYTES) {
+                                    if chunk.is_empty() { continue; }
+
+                                    // Ensure we send an even number of bytes if samples are i16
+                                    // This is usually handled if MAX_UDP_PAYLOAD_BYTES is even and chunks are full,
+                                    // but the last chunk might be odd if not careful.
+                                    // However, ESP32's i2s_write takes bytes and should handle it.
+                                    // For safety, ensure chunk.len() is even.
+                                    let bytes_to_send = if chunk.len() % 2 != 0 && chunk.len() > 1 {
+                                        warn!("[UDP_XBeam_Worker->{}] Odd byte chunk detected ({} bytes), might truncate last byte for i16 safety. This should ideally not happen if source data is purely i16.", target_addr_clone, chunk.len());
+                                        // This case should be rare if pcm_samples always gives complete i16 data.
+                                        &chunk[..chunk.len() -1]
+                                    } else {
+                                        chunk
+                                    };
+
+                                    if bytes_to_send.is_empty() { continue; }
+
+
+                                    info!("[UDP_XBeam_Worker->{}] Sending UDP CHUNK: {} bytes.", target_addr_clone, bytes_to_send.len());
+                                    match socket_arc.send(bytes_to_send).await {
+                                        Ok(bytes_sent_in_chunk) => {
+                                            debug!("[UDP_XBeam_Worker->{}] Sent {} bytes in UDP chunk.", target_addr_clone, bytes_sent_in_chunk);
+                                        }
+                                        Err(e) => {
+                                            error!("[UDP_XBeam_Worker->{}] Failed to send UDP chunk: {}",target_addr_clone, e);
+                                            // Decide if we should break the inner loop or continue with next chunk
+                                        }
                                     }
-                                    Err(e) => {
-                                        error!("[UDP_XBeam_Worker->{}] Failed to send UDP data: {}",target_addr_clone, e);
-                                        // Potentially break here if send errors are critical
-                                    }
+                                    // Small delay between sending chunks if needed, though usually not necessary for UDP locally.
+                                    // tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
                                 }
                             }
-                            Ok(None) => { // Crossbeam channel was closed
-                                info!("[UDP_XBeam_Worker->{}] Crossbeam audio source channel closed. Exiting.", target_addr_clone);
+                            Ok(None) => {
+                                info!("[UDP_XBeam_Worker->{}] Crossbeam channel closed. Exiting.", target_addr_clone);
                                 break;
                             }
-                            Err(e) => { // Error from spawn_blocking itself (e.g., panic in the blocking code)
-                                error!("[UDP_XBeam_Worker->{}] Error in spawn_blocking for Crossbeam recv: {}. Exiting.", target_addr_clone, e);
+                            Err(e) => {
+                                error!("[UDP_XBeam_Worker->{}] spawn_blocking error: {}. Exiting.", target_addr_clone, e);
                                 break;
                             }
                         }
@@ -139,24 +154,17 @@ impl UdpAudioOutput {
         Ok(())
     }
 
-    // This method is for stopping the worker task.
     pub async fn stop_stream_processing(&mut self) -> Result<()> {
         self.stop_signal.notify_waiters();
         if let Some(handle) = self.stream_task_handle.take() {
-            info!("[UDP_XBeam] Waiting for UDP stream (from Crossbeam) processing to shut down...");
-            handle
-                .await
-                .context("[UDP_XBeam] UDP stream (from Crossbeam) processing task failed")?;
-            info!("[UDP_XBeam] UDP stream (from Crossbeam) processing shut down.");
+            info!("[UDP_XBeam] Shutting down UDP stream processing...");
+            handle.await.context("[UDP_XBeam] Task failed")?;
+            info!("[UDP_XBeam] UDP stream processing shut down.");
         }
         Ok(())
     }
 }
 
-// The AsyncAudioOutput trait implementation needs careful consideration.
-// If `start_stream` is meant to return a Sender for THIS module to RECEIVE data,
-// and we've now changed it to receive from a CrossbeamReceiver given at start-up,
-// the original trait contract is hard to fulfill directly.
 #[async_trait]
 impl AsyncAudioOutput for UdpAudioOutput {
     async fn start_stream(
@@ -164,22 +172,15 @@ impl AsyncAudioOutput for UdpAudioOutput {
         _sample_rate: u32,
         _channels: u16,
     ) -> Result<TokioSender<Vec<i16>>> {
-        // This method is problematic now.
-        // For this specific use case where audio is fed via start_with_crossbeam_receiver,
-        // this method shouldn't ideally be called or should return an error/dummy.
         warn!(
-            "[UDP_XBeam] `start_stream` called on UdpAudioOutput configured for Crossbeam. This is likely not intended. Use `start_with_crossbeam_receiver`."
+            "[UDP_XBeam] `start_stream` called (likely from trait). Use `start_with_crossbeam_receiver` for direct Crossbeam input."
         );
-        // Return a dummy channel or an error to satisfy the trait but indicate misuse.
-        // let (tx, _rx) = tokio::sync::mpsc::channel(1); // Dummy channel
-        // Ok(tx)
         Err(anyhow!(
-            "UdpAudioOutput (Crossbeam version) should be started with `start_with_crossbeam_receiver`, not `start_stream` from trait for data input."
+            "UdpAudioOutput (Crossbeam) should use `start_with_crossbeam_receiver`."
         ))
     }
 
     async fn stop_stream(&mut self) -> Result<()> {
-        // Delegate to the new stop method
         self.stop_stream_processing().await
     }
 }
