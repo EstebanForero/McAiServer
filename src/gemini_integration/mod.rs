@@ -149,7 +149,7 @@ pub async fn create_gemini_client(
         response_modalities: Some(vec![ResponseModality::Audio]),
         temperature: Some(0.7),
         speech_config: Some(SpeechConfig {
-            language_code: Some(SpeechLanguageCode::EnglishUS),
+            language_code: Some(SpeechLanguageCode::SpanishES),
         }),
         ..Default::default()
     });
