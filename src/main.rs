@@ -67,7 +67,7 @@ async fn main() -> Result<()> {
         }
         "TCP_SPEAKER" => {
             let esp32_speaker_tcp_addr = app_config
-                .tcp_server_address
+                .udp_output_address
                 .clone()
                 .expect("TARGET_ADDRESS for ESP32 Speaker TCP output missing");
 
