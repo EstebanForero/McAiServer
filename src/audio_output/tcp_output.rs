@@ -48,7 +48,7 @@ impl TcpAudioOutput {
 
         // The task will own the TcpStream connection lifecycle
         let task = tokio::spawn(async move {
-            info!(
+            debug!(
                 "[TCP_XBeam_Worker->{}] Started. Attempting to connect...",
                 target_addr_clone
             );
@@ -117,7 +117,7 @@ impl TcpAudioOutput {
                                 // Send the byte buffer over TCP
                                 // TCP is a stream, so no explicit chunking like UDP is needed here.
                                 // `write_all` ensures all data is sent.
-                                info!("[TCP_XBeam_Worker->{}] Sending {} bytes ({} samples) via TCP.", target_addr_clone, byte_buffer.len(), byte_buffer.len() / 2);
+                                debug!("[TCP_XBeam_Worker->{}] Sending {} bytes ({} samples) via TCP.", target_addr_clone, byte_buffer.len(), byte_buffer.len() / 2);
                                 match active_stream.write_all(&byte_buffer).await {
                                     Ok(_) => {
                                         debug!("[TCP_XBeam_Worker->{}] Sent {} bytes via TCP.", target_addr_clone, byte_buffer.len());
