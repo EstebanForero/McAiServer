@@ -7,7 +7,7 @@ edition = "2024"
 tokio = { version = "1", features = ["full"] }
 chrono = "0.4.38"
 lame-sys = "0.1.2"
-gemini-live-api = "0.1.1"
+gemini-live-api = { path = "chat-gpt-live-api"}
 tokio-util = "0.7.15"
 dotenv = "0.15.0"
 tracing = "0.1.41"

@@ -7,7 +7,7 @@ use tracing::{Level, debug, error, info, warn};
 mod audio_input;
 mod audio_output;
 mod config;
-mod gemini_integration;
+mod openai_integration;
 
 use audio_input::{
     AsyncAudioInput, mic_input::MicAudioInput, tcp_input::TcpAudioInput as MicTcpInput,

@@ -585,12 +585,12 @@ dependencies = [
 [[package]]
 name = "gemini-live-api"
 version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f0a095cb5b4be4b3edda58fe706431d6e31dcf5d34d406328e4b7ad64d3838d"
 dependencies = [
+ "async-trait",
  "base64",
  "futures-util",
  "gemini-live-macros",
+ "http",
  "rustls",
  "serde",
  "serde_json",
@@ -604,8 +604,6 @@ dependencies = [
 [[package]]
 name = "gemini-live-macros"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "66321df23eb123ef124a93a4e60710b3b5e1f7d6f24be4b89b3c25aecfe4836b"
 dependencies = [
  "proc-macro2",
  "quote",
