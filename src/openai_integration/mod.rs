@@ -1,9 +1,9 @@
+// src/openai_integration/mod.rs
 use anyhow::Result;
-use base64::Engine as _;
 use crossbeam_channel::Sender as CrossbeamSender;
 use gemini_live_api::{
-    GeminiLiveClient, GeminiLiveClientBuilder,
-    client::{ServerContentContext, UsageMetadataContext},
+    AiClientBuilder,                                                    // <<< CHANGED
+    client::{AiLiveClient, ServerContentContext, UsageMetadataContext}, // <<< AiLiveClient
     types::*,
 };
 use std::io::Write;
@@ -11,23 +11,29 @@ use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Notify;
 use tracing::{debug, error, info, warn};
 
-mod tools;
-use super::gemini_integration::tools::register_all_tools;
+mod tools; // Assuming tools.rs is also moved and adapted
+use super::openai_integration::tools::register_all_tools; // <<< CHANGED
 use crate::config::Config;
 
+// OpenAI output is typically 24kHz
 pub const AI_OUTPUT_SAMPLE_RATE_HZ: u32 = 24000;
 pub const AI_OUTPUT_CHANNELS: u16 = 1;
 
 #[derive(Clone, Debug)]
-pub struct GeminiAppState {
+pub struct OpenAiAppState {
+    // <<< CHANGED
     pub current_turn_text: Arc<StdMutex<String>>,
     pub turn_complete_signal: Arc<Notify>,
     pub ai_audio_playback_sender: Option<Arc<CrossbeamSender<Vec<i16>>>>,
-    pub backend_url: String,
+    pub backend_url: Option<String>, // Made Option, as it's only for tools
 }
 
-impl GeminiAppState {
-    pub fn new(playback_sender: Option<CrossbeamSender<Vec<i16>>>, backend_url: String) -> Self {
+impl OpenAiAppState {
+    // <<< CHANGED
+    pub fn new(
+        playback_sender: Option<CrossbeamSender<Vec<i16>>>,
+        backend_url: Option<String>,
+    ) -> Self {
         Self {
             current_turn_text: Arc::new(StdMutex::new(String::new())),
             turn_complete_signal: Arc::new(Notify::new()),
@@ -37,142 +43,106 @@ impl GeminiAppState {
     }
 }
 
-async fn handle_gemini_content(ctx: ServerContentContext, app_state: Arc<GeminiAppState>) {
-    debug!("[Handler] Received content: {:?}", ctx.content);
-    let mut new_text_received = false;
+// Adapted for OpenAI's ServerContentContext structure
+async fn handle_openai_content(ctx: ServerContentContext, app_state: Arc<OpenAiAppState>) {
+    // <<< CHANGED
+    // ctx directly provides text, audio, is_done
+    if let Some(text_segment) = ctx.text {
+        if !text_segment.is_empty() {
+            print!("{}", text_segment); // OpenAI sends deltas, print directly
+            std::io::stdout().flush().unwrap_or_default();
+            app_state
+                .current_turn_text
+                .lock()
+                .unwrap()
+                .push_str(&text_segment);
+        }
+    }
 
-    if let Some(model_turn) = &ctx.content.model_turn {
-        for part in &model_turn.parts {
-            if let Some(text) = &part.text {
-                if !text.is_empty() {
-                    print!("{}", text);
-                    std::io::stdout().flush().unwrap_or_default();
-                    app_state.current_turn_text.lock().unwrap().push_str(text);
-                    new_text_received = true;
-                }
-            }
-            if let Some(function_call) = &part.function_call {
-                info!(
-                    "\n[Handler] Requested function call: {} with args {:?}",
-                    function_call.name, function_call.args
-                );
-            }
-            if let Some(function_response) = &part.function_response {
-                info!(
-                    "\n[Handler] Processed function response: {}",
-                    function_response.name
-                );
-            }
-            if let Some(blob) = &part.inline_data {
-                if blob.mime_type.starts_with("audio/") {
-                    debug!(
-                        "[Handler] Received audio blob from Gemini (mime_type: {}). Decoding...",
-                        blob.mime_type
+    if let Some(audio_samples) = ctx.audio {
+        if !audio_samples.is_empty() {
+            debug!(
+                "[Handler] Received {} audio samples from OpenAI.",
+                audio_samples.len()
+            );
+            if let Some(playback_sender_arc) = &app_state.ai_audio_playback_sender {
+                if let Err(e) = playback_sender_arc.send(audio_samples) {
+                    error!(
+                        "[Handler] Error sending AI audio samples to playback: {}",
+                        e
                     );
-                    if let Some(playback_sender_arc) = &app_state.ai_audio_playback_sender {
-                        match base64::engine::general_purpose::STANDARD.decode(&blob.data) {
-                            Ok(decoded_bytes) => {
-                                if decoded_bytes.is_empty() {
-                                    warn!("[Handler] Decoded audio from Gemini is empty.");
-                                    continue;
-                                }
-                                let samples: Vec<i16> = decoded_bytes
-                                    .chunks_exact(2)
-                                    .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
-                                    .collect();
-
-                                if !samples.is_empty() {
-                                    if let Err(e) = playback_sender_arc.send(samples) {
-                                        error!(
-                                            "[Handler] Error sending AI audio samples to playback channel: {}",
-                                            e
-                                        );
-                                    } else {
-                                        debug!(
-                                            "[Handler] Sent {} AI audio samples to playback channel.",
-                                            decoded_bytes.len() / 2
-                                        );
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                error!("[Handler] Base64 decode error for Gemini audio: {}", e)
-                            }
-                        }
-                    } else {
-                        warn!(
-                            "[Handler] Received audio from Gemini, but no playback sender in AppState."
-                        );
-                    }
                 }
+            } else {
+                warn!("[Handler] Received audio from OpenAI, but no playback sender.");
             }
         }
     }
-    if let Some(transcription) = &ctx.content.output_transcription {
-        debug!(
-            "[Handler] Model Output Transcription: {}",
-            transcription.text
-        );
-    }
 
-    if ctx.content.turn_complete {
-        if new_text_received {
-            println!();
+    if ctx.is_done {
+        let current_text = app_state.current_turn_text.lock().unwrap().clone();
+        if !current_text.trim().is_empty() {
+            println!(); // Newline after full text response
             std::io::stdout().flush().unwrap_or_default();
         }
-        info!("[Handler] Model turn_complete message received.");
-        app_state.current_turn_text.lock().unwrap().clear();
-        app_state.turn_complete_signal.notify_one();
+        info!("[Handler] OpenAI content segment processing complete (is_done=true).");
+        // For OpenAI, `is_done` here means a text or audio segment is done.
+        // The actual "turn" completion is signaled by a ModelTurnComplete event
+        // which is handled by the library and can trigger client.state().turn_complete_signal
+        // or a dedicated handler if you add one to the builder.
+        // For simplicity here, we'll assume is_done might imply a point where UI can update.
+        // The main loop's turn_complete_signal will be notified by the library's internal handling of ModelTurnComplete.
+        app_state.turn_complete_signal.notify_one(); // Or rely on client's internal notification
     }
 }
 
-async fn handle_gemini_usage_metadata(ctx: UsageMetadataContext, _app_state: Arc<GeminiAppState>) {
-    info!("[Handler] Usage Metadata: {:?}", ctx.metadata);
+async fn handle_openai_usage_metadata(ctx: UsageMetadataContext, _app_state: Arc<OpenAiAppState>) {
+    // <<< CHANGED
+    info!("[Handler] OpenAI Usage Metadata: {:?}", ctx.metadata);
 }
 
-pub async fn create_gemini_client(
+pub async fn create_openai_client(
+    // <<< CHANGED
     app_config: &Config,
     initial_prompt_text: Option<String>,
     ai_audio_playback_sender: Option<CrossbeamSender<Vec<i16>>>,
-) -> Result<GeminiLiveClient<GeminiAppState>> {
-    let gemini_app_state = GeminiAppState::new(
+) -> Result<AiLiveClient<OpenAiAppState, gemini_live_api::client::openai_backend::OpenAiBackend>> {
+    // More specific client type
+    let openai_app_state = OpenAiAppState::new(
+        // <<< CHANGED
         ai_audio_playback_sender,
-        app_config.backend_url.clone().unwrap(),
+        app_config.backend_url.clone(),
     );
 
     info!(
-        "Configuring Gemini Live Client for model: {}",
-        app_config.gemini_model_name
+        "Configuring OpenAI Live Client for model: {}", // <<< CHANGED
+        app_config.openai_model_name                    // <<< CHANGED
     );
-    let mut builder = GeminiLiveClientBuilder::<GeminiAppState>::new_with_state(
-        app_config.gemini_api_key.clone(),
-        app_config.gemini_model_name.clone(),
-        gemini_app_state.clone(),
+    let mut builder = AiClientBuilder::<OpenAiAppState>::new_with_model_and_state(
+        // <<< CHANGED
+        app_config.openai_api_key.clone(),    // <<< CHANGED
+        app_config.openai_model_name.clone(), // <<< CHANGED
+        openai_app_state.clone(),
     );
 
     builder = builder.generation_config(GenerationConfig {
-        response_modalities: Some(vec![ResponseModality::Audio]),
+        response_modalities: Some(vec![ResponseModality::Audio, ResponseModality::Text]),
         temperature: Some(0.7),
-        speech_config: Some(SpeechConfig {
-            language_code: Some(SpeechLanguageCode::SpanishES),
-        }),
+        // No speech_config for OpenAI here; use .voice()
         ..Default::default()
     });
 
-    builder = builder.realtime_input_config(RealtimeInputConfig {
-        automatic_activity_detection: Some(AutomaticActivityDetection {
-            disabled: Some(false),
-            silence_duration_ms: Some(500),
-            prefix_padding_ms: Some(100),
-            start_of_speech_sensitivity: Some(StartSensitivity::StartSensitivityHigh),
-            end_of_speech_sensitivity: Some(EndSensitivity::EndSensitivityHigh),
-        }),
-        activity_handling: Some(ActivityHandling::StartOfActivityInterrupts),
-        turn_coverage: Some(TurnCoverage::TurnIncludesOnlyActivity),
-    });
-    builder = builder.output_audio_transcription(AudioTranscriptionConfig {});
+    // OpenAI specific settings
+    builder = builder.voice("alloy".to_string()); // Example voice
+    builder = builder.input_audio_format("pcm16".to_string()); // OpenAI expects this for raw
+    builder = builder.output_audio_format("pcm16".to_string()); // Request pcm16 output
+
+    // No RealtimeInputConfig for OpenAI in this library's abstraction; VAD is different.
+    // builder = builder.realtime_input_config(...)
+
+    builder = builder.output_audio_transcription(AudioTranscriptionConfig {}); // Enable transcription
+
     let system_message = initial_prompt_text.unwrap_or_else(||
-        "Eres un asistente que solo habla en espanol, que recive ordenes para un McDonalds, que envia datos de las ordenes con la echo tool, en json".to_string()
+        "You are a helpful voice assistant for McDonald's that takes orders and can use tools. Please respond in Spanish.".to_string()
     );
     info!("Using system instruction: \"{}\"", system_message);
     builder = builder.system_instruction(Content {
@@ -180,15 +150,15 @@ pub async fn create_gemini_client(
             text: Some(system_message),
             ..Default::default()
         }],
-        role: Some(Role::System),
+        role: Some(Role::System), // Make sure Role::System is used
     });
 
-    builder = builder.on_server_content(handle_gemini_content);
-    builder = builder.on_usage_metadata(handle_gemini_usage_metadata);
-    builder = register_all_tools(builder);
+    builder = builder.on_server_content(handle_openai_content); // <<< CHANGED
+    builder = builder.on_usage_metadata(handle_openai_usage_metadata); // <<< CHANGED
+    builder = register_all_tools(builder); // Assumes tools.rs is adapted
 
-    info!("Connecting Gemini client...");
-    let client = builder.connect().await?;
-    info!("Gemini client connected successfully.");
+    info!("Connecting OpenAI client..."); // <<< CHANGED
+    let client = builder.connect_openai().await?; // <<< CHANGED to connect_openai
+    info!("OpenAI client connected successfully."); // <<< CHANGED
     Ok(client)
 }
