@@ -2,34 +2,36 @@
 use anyhow::Result;
 use crossbeam_channel::Sender as CrossbeamSender;
 use gemini_live_api::{
-    AiClientBuilder,                                                    // <<< CHANGED
-    client::{AiLiveClient, ServerContentContext, UsageMetadataContext}, // <<< AiLiveClient
+    // Assuming this is your top-level library crate
+    AiClientBuilder,
+    client::{AiLiveClient, ServerContentContext, UsageMetadataContext},
     types::*,
 };
 use std::io::Write;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{
+    Arc, Mutex as StdMutex,
+    atomic::{AtomicBool, Ordering},
+}; // Added AtomicBool
 use tokio::sync::Notify;
 use tracing::{debug, error, info, warn};
 
-mod tools; // Assuming tools.rs is also moved and adapted
-use super::openai_integration::tools::register_all_tools; // <<< CHANGED
+mod tools;
+use super::openai_integration::tools::register_all_tools;
 use crate::config::Config;
 
-// OpenAI output is typically 24kHz
 pub const AI_OUTPUT_SAMPLE_RATE_HZ: u32 = 24000;
 pub const AI_OUTPUT_CHANNELS: u16 = 1;
 
 #[derive(Clone, Debug)]
 pub struct OpenAiAppState {
-    // <<< CHANGED
     pub current_turn_text: Arc<StdMutex<String>>,
     pub turn_complete_signal: Arc<Notify>,
     pub ai_audio_playback_sender: Option<Arc<CrossbeamSender<Vec<i16>>>>,
-    pub backend_url: Option<String>, // Made Option, as it's only for tools
+    pub backend_url: Option<String>,
+    ai_is_speaking: Arc<AtomicBool>, // To track if AI is currently sending audio
 }
 
 impl OpenAiAppState {
-    // <<< CHANGED
     pub fn new(
         playback_sender: Option<CrossbeamSender<Vec<i16>>>,
         backend_url: Option<String>,
@@ -39,17 +41,24 @@ impl OpenAiAppState {
             turn_complete_signal: Arc::new(Notify::new()),
             ai_audio_playback_sender: playback_sender.map(Arc::new),
             backend_url,
+            ai_is_speaking: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    pub fn set_ai_is_speaking(&self, speaking: bool) {
+        self.ai_is_speaking.store(speaking, Ordering::Relaxed);
+    }
+
+    pub fn is_ai_speaking(&self) -> bool {
+        self.ai_is_speaking.load(Ordering::Relaxed)
     }
 }
 
-// Adapted for OpenAI's ServerContentContext structure
 async fn handle_openai_content(ctx: ServerContentContext, app_state: Arc<OpenAiAppState>) {
-    // <<< CHANGED
-    // ctx directly provides text, audio, is_done
-    if let Some(text_segment) = ctx.text {
+    if let Some(text_segment) = ctx.text.clone() {
         if !text_segment.is_empty() {
-            print!("{}", text_segment); // OpenAI sends deltas, print directly
+            app_state.set_ai_is_speaking(true); // AI is "speaking" text
+            print!("{}", text_segment);
             std::io::stdout().flush().unwrap_or_default();
             app_state
                 .current_turn_text
@@ -61,6 +70,7 @@ async fn handle_openai_content(ctx: ServerContentContext, app_state: Arc<OpenAiA
 
     if let Some(audio_samples) = ctx.audio {
         if !audio_samples.is_empty() {
+            app_state.set_ai_is_speaking(true); // AI is sending audio
             debug!(
                 "[Handler] Received {} audio samples from OpenAI.",
                 audio_samples.len()
@@ -80,69 +90,60 @@ async fn handle_openai_content(ctx: ServerContentContext, app_state: Arc<OpenAiA
 
     if ctx.is_done {
         let current_text = app_state.current_turn_text.lock().unwrap().clone();
-        if !current_text.trim().is_empty() {
-            println!(); // Newline after full text response
+        if !current_text.trim().is_empty() && ctx.text.is_some() {
+            // Only add newline if this 'done' was for text
+            println!();
             std::io::stdout().flush().unwrap_or_default();
         }
         info!("[Handler] OpenAI content segment processing complete (is_done=true).");
-        // For OpenAI, `is_done` here means a text or audio segment is done.
-        // The actual "turn" completion is signaled by a ModelTurnComplete event
-        // which is handled by the library and can trigger client.state().turn_complete_signal
-        // or a dedicated handler if you add one to the builder.
-        // For simplicity here, we'll assume is_done might imply a point where UI can update.
-        // The main loop's turn_complete_signal will be notified by the library's internal handling of ModelTurnComplete.
-        app_state.turn_complete_signal.notify_one(); // Or rely on client's internal notification
+        // This `is_done` signals the end of a particular content type (text or audio chunk).
+        // The library itself will detect the end of the *entire* turn (ModelTurnComplete)
+        // and notify the `turn_complete_signal` you see in main.rs.
+        // We can also set ai_is_speaking to false here if this 'done' means no more audio/text for now.
+        // However, there might be multiple 'done' segments. The final 'ModelTurnComplete' is more reliable.
+        // For VAD, it's better to rely on the main loop's signal.
+        // If this is the *final* segment of a turn (e.g. after all audio and text), then:
+        // app_state.set_ai_is_speaking(false);
+        // The library should signal turn_complete_signal upon "response.done" or equivalent.
+        // For now, let main loop's turn_complete_signal handle setting ai_is_speaking to false.
     }
 }
 
 async fn handle_openai_usage_metadata(ctx: UsageMetadataContext, _app_state: Arc<OpenAiAppState>) {
-    // <<< CHANGED
     info!("[Handler] OpenAI Usage Metadata: {:?}", ctx.metadata);
 }
 
 pub async fn create_openai_client(
-    // <<< CHANGED
     app_config: &Config,
     initial_prompt_text: Option<String>,
     ai_audio_playback_sender: Option<CrossbeamSender<Vec<i16>>>,
 ) -> Result<AiLiveClient<OpenAiAppState, gemini_live_api::client::openai_backend::OpenAiBackend>> {
-    // More specific client type
-    let openai_app_state = OpenAiAppState::new(
-        // <<< CHANGED
-        ai_audio_playback_sender,
-        app_config.backend_url.clone(),
-    );
+    let openai_app_state =
+        OpenAiAppState::new(ai_audio_playback_sender, app_config.backend_url.clone());
 
     info!(
-        "Configuring OpenAI Live Client for model: {}", // <<< CHANGED
-        app_config.openai_model_name                    // <<< CHANGED
+        "Configuring OpenAI Live Client for model: {}",
+        app_config.openai_model_name
     );
     let mut builder = AiClientBuilder::<OpenAiAppState>::new_with_model_and_state(
-        // <<< CHANGED
-        app_config.openai_api_key.clone(),    // <<< CHANGED
-        app_config.openai_model_name.clone(), // <<< CHANGED
+        app_config.openai_api_key.clone(),
+        app_config.openai_model_name.clone(),
         openai_app_state.clone(),
     );
 
     builder = builder.generation_config(GenerationConfig {
         response_modalities: Some(vec![ResponseModality::Audio, ResponseModality::Text]),
         temperature: Some(0.7),
-        // No speech_config for OpenAI here; use .voice()
         ..Default::default()
     });
 
-    // OpenAI specific settings
-    builder = builder.voice("alloy".to_string()); // Example voice
-    builder = builder.input_audio_format("pcm16".to_string()); // OpenAI expects this for raw
-    builder = builder.output_audio_format("pcm16".to_string()); // Request pcm16 output
+    builder = builder.voice("alloy".to_string());
+    builder = builder.input_audio_format("pcm16".to_string());
+    builder = builder.output_audio_format("pcm16".to_string());
+    builder = builder.output_audio_transcription(AudioTranscriptionConfig {});
 
-    // No RealtimeInputConfig for OpenAI in this library's abstraction; VAD is different.
-    // builder = builder.realtime_input_config(...)
-
-    builder = builder.output_audio_transcription(AudioTranscriptionConfig {}); // Enable transcription
-
-    let system_message = initial_prompt_text.unwrap_or_else(||
-        "You are a helpful voice assistant for McDonald's that takes orders and can use tools. Please respond in Spanish.".to_string()
+    let system_message = initial_prompt_text.unwrap_or_else(
+        || "You are a helpful voice assistant. Respond concisely.".to_string(), // Generic prompt
     );
     info!("Using system instruction: \"{}\"", system_message);
     builder = builder.system_instruction(Content {
@@ -150,15 +151,15 @@ pub async fn create_openai_client(
             text: Some(system_message),
             ..Default::default()
         }],
-        role: Some(Role::System), // Make sure Role::System is used
+        role: Some(Role::System),
     });
 
-    builder = builder.on_server_content(handle_openai_content); // <<< CHANGED
-    builder = builder.on_usage_metadata(handle_openai_usage_metadata); // <<< CHANGED
-    builder = register_all_tools(builder); // Assumes tools.rs is adapted
+    builder = builder.on_server_content(handle_openai_content);
+    builder = builder.on_usage_metadata(handle_openai_usage_metadata);
+    builder = register_all_tools(builder);
 
-    info!("Connecting OpenAI client..."); // <<< CHANGED
-    let client = builder.connect_openai().await?; // <<< CHANGED to connect_openai
-    info!("OpenAI client connected successfully."); // <<< CHANGED
+    info!("Connecting OpenAI client...");
+    let client = builder.connect_openai().await?;
+    info!("OpenAI client connected successfully.");
     Ok(client)
 }
