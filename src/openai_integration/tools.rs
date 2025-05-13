@@ -50,7 +50,7 @@ async fn delete_invoice_dish(
     })?;
 
     info!(order_id, dish_id, %url, "Successfully deleted dish from order");
-    Ok(text_response)
+    Ok("Dish was deleted succesfully, from the order".to_string())
 }
 
 #[tool_function(
@@ -96,7 +96,7 @@ async fn set_order_status_to_pending(
     })?;
 
     info!(order_id, %url, "Successfully set order status to Pending");
-    Ok(text_response)
+    Ok("The order status was succesfully setted to Pending".to_string())
 }
 
 #[tool_function("Retrieves the total amount for a specific order. Requires the order ID.")]
@@ -273,7 +273,9 @@ async fn create_order(state: Arc<OpenAiAppState>, table_number: u32) -> Result<S
     })?;
 
     info!(table_number, %url, "Successfully created new order: {text_response}");
-    Ok(text_response)
+    Ok(format!(
+        "Orded created succesfully for the table number: {table_number}"
+    ))
 }
 
 #[tool_function(
@@ -336,7 +338,7 @@ async fn add_dish_to_order(
     })?;
 
     warn!(order_id, dish_id, %url, "Successfully added dish to order: {text_response}");
-    Ok(text_response)
+    Ok("Succesfully added dish to order".to_string())
 }
 
 // Adapt the register_all_tools function
