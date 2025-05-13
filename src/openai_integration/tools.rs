@@ -1,26 +1,26 @@
-use gemini_live_api::{GeminiLiveClientBuilder, tool_function};
-use reqwest::{Method, Url};
-use serde::Serialize;
-use serde_json::json;
 use std::sync::Arc;
+
+use gemini_live_api::{AiClientBuilder, tool_function};
+use serde::Serialize;
 use tracing::{error, info};
 
-use super::GeminiAppState;
+use super::OpenAiAppState;
 
 #[tool_function(
     "Deletes a specific dish from a given order. Requires the order ID and the dish ID."
 )]
 async fn delete_invoice_dish(
-    state: Arc<GeminiAppState>,
+    state: Arc<OpenAiAppState>,
     order_id: u32,
     dish_id: u32,
 ) -> Result<String, String> {
+    let backend_url = state
+        .backend_url
+        .as_ref()
+        .ok_or_else(|| "Backend URL not configured".to_string())?;
     info!(order_id, dish_id, "Attempting to delete dish from order");
     let client = reqwest::Client::new();
-    let url = format!(
-        "{}/invoice/dish/{}/{}",
-        state.backend_url, order_id, dish_id
-    );
+    let url = format!("{}/invoice/dish/{}/{}", backend_url, order_id, dish_id);
     info!(%url, "Sending DELETE request to delete dish");
 
     let response = client.delete(&url).send().await.map_err(|err| {
@@ -57,12 +57,16 @@ async fn delete_invoice_dish(
     "Updates the status of a given order to 'Pending' (for preparation). Requires the order ID."
 )]
 async fn set_order_status_to_pending(
-    state: Arc<GeminiAppState>,
+    state: Arc<OpenAiAppState>, // <<< Make sure this matches
     order_id: u32,
 ) -> Result<String, String> {
+    let backend_url = state
+        .backend_url
+        .as_ref()
+        .ok_or_else(|| "Backend URL not configured".to_string())?;
     info!(order_id, "Attempting to set order status to Pending");
     let client = reqwest::Client::new();
-    let url = format!("{}/changestatus/{}/Pending", state.backend_url, order_id);
+    let url = format!("{}/changestatus/{}/Pending", backend_url, order_id);
     info!(%url, "Sending PUT request to set order status");
 
     let response = client.put(&url).send().await.map_err(|err| {
@@ -96,9 +100,14 @@ async fn set_order_status_to_pending(
 }
 
 #[tool_function("Retrieves the total amount for a specific order. Requires the order ID.")]
-async fn get_order_total(state: Arc<GeminiAppState>, order_id: u32) -> Result<String, String> {
+async fn get_order_total(state: Arc<OpenAiAppState>, order_id: u32) -> Result<String, String> {
+    // <<< Make sure this matches
+    let backend_url = state
+        .backend_url
+        .as_ref()
+        .ok_or_else(|| "Backend URL not configured".to_string())?;
     info!(order_id, "Attempting to get order total");
-    let url = format!("{}/total/{}", state.backend_url, order_id);
+    let url = format!("{}/total/{}", backend_url, order_id);
     info!(%url, "Sending GET request for order total");
 
     let response = reqwest::get(&url).await.map_err(|err| {
@@ -129,9 +138,14 @@ async fn get_order_total(state: Arc<GeminiAppState>, order_id: u32) -> Result<St
 }
 
 #[tool_function("Fetches all dishes associated with a specific order. Requires the order ID.")]
-async fn get_order_dishes(state: Arc<GeminiAppState>, order_id: u32) -> Result<String, String> {
+async fn get_order_dishes(state: Arc<OpenAiAppState>, order_id: u32) -> Result<String, String> {
+    // <<< Make sure this matches
+    let backend_url = state
+        .backend_url
+        .as_ref()
+        .ok_or_else(|| "Backend URL not configured".to_string())?;
     info!(order_id, "Attempting to get dishes for order");
-    let url = format!("{}/dishes/{}", state.backend_url, order_id);
+    let url = format!("{}/dishes/{}", backend_url, order_id);
     info!(%url, "Sending GET request for order dishes");
 
     let response = reqwest::get(&url).await.map_err(|err| {
@@ -141,7 +155,7 @@ async fn get_order_dishes(state: Arc<GeminiAppState>, order_id: u32) -> Result<S
 
     if !response.status().is_success() {
         let error_message = format!(
-            "Error getting invoice dishes: {} - {}", // Note: log message still says "invoice dishes"
+            "Error getting invoice dishes: {} - {}",
             response.status(),
             response
                 .text()
@@ -154,7 +168,7 @@ async fn get_order_dishes(state: Arc<GeminiAppState>, order_id: u32) -> Result<S
 
     let text_response = response.text().await.map_err(|err| {
         error!(
-            "Error converting get_invoice_dishes response to text: {}", // Note: log message still says "invoice dishes"
+            "Error converting get_invoice_dishes response to text: {}",
             err
         );
         err.to_string()
@@ -165,9 +179,14 @@ async fn get_order_dishes(state: Arc<GeminiAppState>, order_id: u32) -> Result<S
 }
 
 #[tool_function("Retrieves a list of all available dishes in the restaurant.")]
-async fn get_all_dishes(state: Arc<GeminiAppState>) -> Result<String, String> {
+async fn get_all_dishes(state: Arc<OpenAiAppState>) -> Result<String, String> {
+    // <<< Make sure this matches
+    let backend_url = state
+        .backend_url
+        .as_ref()
+        .ok_or_else(|| "Backend URL not configured".to_string())?;
     info!("Attempting to get all dishes");
-    let url = format!("{}/dishes", state.backend_url);
+    let url = format!("{}/dishes", backend_url);
     info!(%url, "Sending GET request for all dishes");
 
     let response = reqwest::get(&url).await.map_err(|err| {
@@ -200,12 +219,17 @@ async fn get_all_dishes(state: Arc<GeminiAppState>) -> Result<String, String> {
 #[tool_function(
     "Creates a new order for a specified table. The order is initialized with 'Loading' status. Requires the table number and returns the new order ID or details."
 )]
-async fn create_order(state: Arc<GeminiAppState>, table_number: u32) -> Result<String, String> {
+async fn create_order(state: Arc<OpenAiAppState>, table_number: u32) -> Result<String, String> {
+    // <<< Make sure this matches
+    let backend_url = state
+        .backend_url
+        .as_ref()
+        .ok_or_else(|| "Backend URL not configured".to_string())?;
     info!(table_number, "Attempting to create a new order");
     let client = reqwest::Client::new();
-    let url = format!("{}/order", state.backend_url);
+    let url = format!("{}/order", backend_url);
 
-    #[derive(Serialize, Debug)] // Added Debug for logging
+    #[derive(Serialize, Debug)]
     struct NewOrderPayload {
         id_desk: u32,
         status: String,
@@ -253,15 +277,19 @@ async fn create_order(state: Arc<GeminiAppState>, table_number: u32) -> Result<S
     "Adds a specific dish to an existing order. Requires the order ID and the dish ID."
 )]
 async fn add_dish_to_order(
-    state: Arc<GeminiAppState>,
+    state: Arc<OpenAiAppState>, // <<< Make sure this matches
     order_id: u32,
     dish_id: u32,
 ) -> Result<String, String> {
+    let backend_url = state
+        .backend_url
+        .as_ref()
+        .ok_or_else(|| "Backend URL not configured".to_string())?;
     info!(order_id, dish_id, "Attempting to add dish to order");
     let client = reqwest::Client::new();
-    let url = format!("{}/invoice", state.backend_url);
+    let url = format!("{}/invoice", backend_url);
 
-    #[derive(Serialize, Debug)] // Added Debug for logging
+    #[derive(Serialize, Debug)]
     struct AddToInvoicePayload {
         id_order: u32,
         id_dish: u32,
@@ -285,7 +313,7 @@ async fn add_dish_to_order(
 
     if !response.status().is_success() {
         let error_message = format!(
-            "Error adding dish to invoice: {} - {}", // Note: log message still says "invoice"
+            "Error adding dish to invoice: {} - {}",
             response.status(),
             response
                 .text()
@@ -298,7 +326,7 @@ async fn add_dish_to_order(
 
     let text_response = response.text().await.map_err(|err| {
         error!(
-            "Error converting add_dish_to_invoice response to text: {}", // Note: log message still says "invoice"
+            "Error converting add_dish_to_invoice response to text: {}",
             err
         );
         err.to_string()
@@ -308,9 +336,11 @@ async fn add_dish_to_order(
     Ok(text_response)
 }
 
+// Adapt the register_all_tools function
 pub fn register_all_tools(
-    builder: GeminiLiveClientBuilder<GeminiAppState>,
-) -> GeminiLiveClientBuilder<GeminiAppState> {
+    builder: AiClientBuilder<OpenAiAppState>, // <<< CHANGED
+) -> AiClientBuilder<OpenAiAppState> {
+    // <<< CHANGED
     let builder = get_all_dishes_register_tool(builder);
     let builder = add_dish_to_order_register_tool(builder);
     let builder = create_order_register_tool(builder);
@@ -318,6 +348,6 @@ pub fn register_all_tools(
     let builder = get_order_total_register_tool(builder);
     let builder = set_order_status_to_pending_register_tool(builder);
     let builder = delete_invoice_dish_register_tool(builder);
-    info!("Registered tools: get_weather, echo_message");
+    info!("Registered all McDonald's tools for OpenAI."); // <<< CHANGED
     builder
 }

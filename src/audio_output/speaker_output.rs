@@ -12,7 +12,7 @@ use std::sync::{
 use tracing::{error, info, warn};
 
 use crate::audio_input::mic_input::find_supported_config_generic;
-use crate::gemini_integration::{AI_OUTPUT_CHANNELS, AI_OUTPUT_SAMPLE_RATE_HZ};
+use crate::openai_integration::{AI_OUTPUT_CHANNELS, AI_OUTPUT_SAMPLE_RATE_HZ};
 
 pub struct SpeakerPlayback {
     _cpal_stream: Option<cpal::Stream>,
