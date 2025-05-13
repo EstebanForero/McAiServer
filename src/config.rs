@@ -12,6 +12,7 @@ pub struct Config {
     pub audio_output_type: String,
     pub speaker_tcp_output_address: Option<String>, // For TCP audio output to ESP32
     pub backend_url: Option<String>,
+    pub tcp_mic_amplification: f32,
 }
 
 impl Config {
@@ -72,10 +73,15 @@ impl Config {
             tracing::warn!(
                 "AUDIO_SAMPLE_RATE is configured to {}. OpenAI's 'pcm16' format expects 24000 Hz. \
                  If using local MIC, ensure it can provide 24kHz or implement resampling. \
-                 If AUDIO_SOURCE=TCP (ESP32), the ESP32 must send 24kHz.",
+                    If AUDIO_SOURCE=TCP (ESP32), the ESP32 must send 24kHz.",
                 audio_sample_rate
             );
         }
+
+        let tcp_mic_amplification = env::var("TCP_MIC_AMPLIFICATION")
+            .unwrap_or_else(|_| "1.0".to_string()) // Default to 1.0 (no change)
+            .parse::<f32>()
+            .context("Invalid TCP_MIC_AMPLIFICATION. Must be a float (e.g., 1.5)")?;
 
         Ok(Self {
             openai_api_key,
@@ -87,6 +93,7 @@ impl Config {
             audio_output_type,
             speaker_tcp_output_address,
             backend_url,
+            tcp_mic_amplification,
         })
     }
 }

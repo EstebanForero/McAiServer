@@ -140,7 +140,7 @@ pub async fn create_openai_client(
     builder = builder.voice("alloy".to_string());
     builder = builder.input_audio_format("pcm16".to_string());
     builder = builder.output_audio_format("pcm16".to_string());
-    builder = builder.output_audio_transcription(AudioTranscriptionConfig {});
+    //builder = builder.output_audio_transcription(AudioTranscriptionConfig {});
 
     let system_message = initial_prompt_text.unwrap_or_else(
         || "You are a helpful voice assistant. Respond concisely.".to_string(), // Generic prompt

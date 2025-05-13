@@ -63,6 +63,7 @@ async fn main() -> Result<()> {
                         .expect("TCP_SERVER_ADDRESS for ESP32 mic input missing"),
                     input_audio_source_sample_rate, // ESP32 sends at this rate (should be 24kHz)
                     app_config.audio_channels,
+                    app_config.tcp_mic_amplification,
                 ))
             }
             "MIC" => {
