@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use gemini_live_api::{AiClientBuilder, tool_function};
 use serde::Serialize;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use super::OpenAiAppState;
 
@@ -18,7 +18,7 @@ async fn delete_invoice_dish(
         .backend_url
         .as_ref()
         .ok_or_else(|| "Backend URL not configured".to_string())?;
-    info!(order_id, dish_id, "Attempting to delete dish from order");
+    warn!(order_id, dish_id, "Attempting to delete dish from order");
     let client = reqwest::Client::new();
     let url = format!("{}/invoice/dish/{}/{}", backend_url, order_id, dish_id);
     info!(%url, "Sending DELETE request to delete dish");
@@ -64,7 +64,7 @@ async fn set_order_status_to_pending(
         .backend_url
         .as_ref()
         .ok_or_else(|| "Backend URL not configured".to_string())?;
-    info!(order_id, "Attempting to set order status to Pending");
+    warn!(order_id, "Attempting to set order status to Pending");
     let client = reqwest::Client::new();
     let url = format!("{}/changestatus/{}/Pending", backend_url, order_id);
     info!(%url, "Sending PUT request to set order status");
@@ -106,7 +106,7 @@ async fn get_order_total(state: Arc<OpenAiAppState>, order_id: u32) -> Result<St
         .backend_url
         .as_ref()
         .ok_or_else(|| "Backend URL not configured".to_string())?;
-    info!(order_id, "Attempting to get order total");
+    warn!(order_id, "Attempting to get order total");
     let url = format!("{}/total/{}", backend_url, order_id);
     info!(%url, "Sending GET request for order total");
 
@@ -134,17 +134,17 @@ async fn get_order_total(state: Arc<OpenAiAppState>, order_id: u32) -> Result<St
     })?;
 
     info!(order_id, %url, "Successfully retrieved order total");
+    warn!(text_response);
     Ok(text_response)
 }
 
 #[tool_function("Fetches all dishes associated with a specific order. Requires the order ID.")]
 async fn get_order_dishes(state: Arc<OpenAiAppState>, order_id: u32) -> Result<String, String> {
-    // <<< Make sure this matches
     let backend_url = state
         .backend_url
         .as_ref()
         .ok_or_else(|| "Backend URL not configured".to_string())?;
-    info!(order_id, "Attempting to get dishes for order");
+    warn!(order_id, "Attempting to get dishes for order");
     let url = format!("{}/dishes/{}", backend_url, order_id);
     info!(%url, "Sending GET request for order dishes");
 
@@ -174,7 +174,7 @@ async fn get_order_dishes(state: Arc<OpenAiAppState>, order_id: u32) -> Result<S
         err.to_string()
     })?;
 
-    info!(order_id, %url, "Successfully retrieved dishes for order");
+    warn!(order_id, %url, "Successfully retrieved dishes for order: {text_response}");
     Ok(text_response)
 }
 
@@ -185,7 +185,7 @@ async fn get_all_dishes(state: Arc<OpenAiAppState>) -> Result<String, String> {
         .backend_url
         .as_ref()
         .ok_or_else(|| "Backend URL not configured".to_string())?;
-    info!("Attempting to get all dishes");
+    warn!("Attempting to get all dishes");
     let url = format!("{}/dishes", backend_url);
     info!(%url, "Sending GET request for all dishes");
 
@@ -212,7 +212,7 @@ async fn get_all_dishes(state: Arc<OpenAiAppState>) -> Result<String, String> {
         err.to_string()
     })?;
 
-    info!(%url, "Successfully retrieved all dishes");
+    warn!(%url, "Successfully retrieved all dishes: {text_response}");
     Ok(text_response)
 }
 
@@ -225,7 +225,10 @@ async fn create_order(state: Arc<OpenAiAppState>, table_number: u32) -> Result<S
         .backend_url
         .as_ref()
         .ok_or_else(|| "Backend URL not configured".to_string())?;
-    info!(table_number, "Attempting to create a new order");
+    warn!(
+        table_number,
+        "Attempting to create a new order, with table number: {table_number}"
+    );
     let client = reqwest::Client::new();
     let url = format!("{}/order", backend_url);
 
@@ -269,7 +272,7 @@ async fn create_order(state: Arc<OpenAiAppState>, table_number: u32) -> Result<S
         err.to_string()
     })?;
 
-    info!(table_number, %url, "Successfully created new order");
+    info!(table_number, %url, "Successfully created new order: {text_response}");
     Ok(text_response)
 }
 
@@ -285,7 +288,7 @@ async fn add_dish_to_order(
         .backend_url
         .as_ref()
         .ok_or_else(|| "Backend URL not configured".to_string())?;
-    info!(order_id, dish_id, "Attempting to add dish to order");
+    warn!(order_id, dish_id, "Attempting to add dish to order");
     let client = reqwest::Client::new();
     let url = format!("{}/invoice", backend_url);
 
@@ -332,7 +335,7 @@ async fn add_dish_to_order(
         err.to_string()
     })?;
 
-    info!(order_id, dish_id, %url, "Successfully added dish to order");
+    warn!(order_id, dish_id, %url, "Successfully added dish to order: {text_response}");
     Ok(text_response)
 }
 
