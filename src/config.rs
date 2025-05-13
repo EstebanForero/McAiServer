@@ -1,5 +1,6 @@
 // src/config.rs
 use anyhow::{Context, Result};
+use gemini_live_api::types::NoiseReductionType;
 use std::env;
 
 pub struct Config {
@@ -13,6 +14,9 @@ pub struct Config {
     pub speaker_tcp_output_address: Option<String>, // For TCP audio output to ESP32
     pub backend_url: Option<String>,
     pub tcp_mic_amplification: f32,
+    pub openai_noise_reduction_type: Option<NoiseReductionType>, // <-- NEW
+    pub openai_transcription_model: Option<String>,              // <-- NEW
+    pub openai_transcription_language: Option<String>,           // <-- NEW
 }
 
 impl Config {
@@ -83,6 +87,28 @@ impl Config {
             .parse::<f32>()
             .context("Invalid TCP_MIC_AMPLIFICATION. Must be a float (e.g., 1.5)")?;
 
+        // Noise Reduction from ENV
+        let openai_noise_reduction_type_str = env::var("OPENAI_NOISE_REDUCTION_TYPE").ok();
+        let openai_noise_reduction_type = openai_noise_reduction_type_str.and_then(|s| {
+            match s.to_lowercase().as_str() {
+                "near_field" => Some(NoiseReductionType::NearField),
+                "far_field" => Some(NoiseReductionType::FarField),
+                "none" | "" | "null" => None, // Explicitly disable or treat as not set
+                _ => {
+                    tracing::warn!(
+                        "Invalid OPENAI_NOISE_REDUCTION_TYPE: '{}'. Disabling noise reduction.",
+                        s
+                    );
+                    None
+                }
+            }
+        });
+
+        // Transcription settings from ENV
+        let openai_transcription_model = env::var("OPENAI_TRANSCRIPTION_MODEL").ok();
+        let openai_transcription_language = env::var("OPENAI_TRANSCRIPTION_LANGUAGE").ok();
+        let openai_transcription_prompt = env::var("OPENAI_TRANSCRIPTION_PROMPT").ok();
+
         Ok(Self {
             openai_api_key,
             openai_model_name,
@@ -94,6 +120,9 @@ impl Config {
             speaker_tcp_output_address,
             backend_url,
             tcp_mic_amplification,
+            openai_noise_reduction_type,
+            openai_transcription_model,
+            openai_transcription_language,
         })
     }
 }

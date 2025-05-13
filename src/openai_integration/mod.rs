@@ -140,7 +140,34 @@ pub async fn create_openai_client(
     builder = builder.voice("alloy".to_string());
     builder = builder.input_audio_format("pcm16".to_string());
     builder = builder.output_audio_format("pcm16".to_string());
+
+    let mut transcription_config = AudioTranscriptionConfig::default();
+    if let Some(model) = &app_config.openai_transcription_model {
+        transcription_config.model = Some(model.clone());
+    }
+
+    if let Some(lang) = &app_config.openai_transcription_language {
+        transcription_config.language = Some(lang.clone());
+    }
+
+    if transcription_config.model.is_some() || transcription_config.language.is_some() {
+        builder = builder.output_audio_transcription(transcription_config);
+    } else {
+        error!("Error adding model, and language")
+    }
     //builder = builder.output_audio_transcription(AudioTranscriptionConfig {});
+    if let Some(nr_type) = &app_config.openai_noise_reduction_type {
+        info!("Enabling OpenAI noise reduction: {:?}", nr_type);
+        builder = builder.input_audio_noise_reduction(InputAudioNoiseReduction {
+            r#type: Some(nr_type.clone()), // Pass the cloned type
+        });
+    } else {
+        info!(
+            "OpenAI noise reduction not configured (or set to none/null). Defaulting to OpenAI's behavior (likely off)."
+        );
+        // To explicitly send `null` to turn it off, if OpenAI requires that for disabling vs. default:
+        // builder = builder.input_audio_noise_reduction(InputAudioNoiseReduction { r#type: None });
+    }
 
     let system_message = initial_prompt_text.unwrap_or_else(
         || "You are a helpful voice assistant. Respond concisely.".to_string(), // Generic prompt
@@ -156,6 +183,8 @@ pub async fn create_openai_client(
 
     builder = builder.on_server_content(handle_openai_content);
     builder = builder.on_usage_metadata(handle_openai_usage_metadata);
+    builder = builder.transcription_model("whisper-1".to_string());
+    builder = builder.transcription_language("es".to_string());
     builder = register_all_tools(builder);
 
     info!("Connecting OpenAI client...");
