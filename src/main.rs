@@ -1,14 +1,13 @@
-// src/main.rs
 use anyhow::{Context, Result, anyhow};
 use crossbeam_channel::Sender as CrossbeamSender;
 use std::{fs, sync::Arc, time::Duration};
-use tokio::sync::mpsc::Receiver as TokioReceiver; // Removed io
+use tokio::sync::mpsc::Receiver as TokioReceiver;
 use tracing::{Level, debug, error, info};
 
 mod audio_input;
 mod audio_output;
 mod config;
-mod openai_integration; // <<< CHANGED
+mod openai_integration;
 
 use audio_input::{
     AsyncAudioInput, mic_input::MicAudioInput, tcp_input::TcpAudioInput as MicTcpInput,
@@ -16,21 +15,20 @@ use audio_input::{
 use audio_output::{speaker_output::SpeakerPlayback, tcp_output::TcpAudioOutput};
 
 use config::Config;
-use openai_integration::{OpenAiAppState, create_openai_client}; // <<< CHANGED
+use openai_integration::{OpenAiAppState, create_openai_client};
 
 fn get_initial_prompt() -> Option<String> {
-    // This function can remain the same if "prompt.txt" is generic enough
-    fs::read_to_string("prompt.txt").ok() // Use read_to_string
+    fs::read_to_string("prompt.txt").ok()
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_max_level(Level::INFO) // Consider .with_env_filter for more flexibility
+        .with_max_level(Level::INFO)
         .with_target(true)
         .init();
 
-    info!("🚀 Starting OpenAI Voice Assistant..."); // <<< CHANGED
+    info!("🚀 Starting OpenAI Voice Assistant...");
     let app_config = Config::from_env().expect("🚨 Failed to load configuration from .env");
 
     let mut audio_input_source: Box<dyn AsyncAudioInput> =
@@ -53,7 +51,7 @@ async fn main() -> Result<()> {
     let (ai_audio_tx_crossbeam, ai_audio_rx_crossbeam) =
         crossbeam_channel::bounded::<Vec<i16>>(100);
 
-    let openai_app_state_playback_sender: Option<CrossbeamSender<Vec<i16>>>; // <<< CHANGED
+    let openai_app_state_playback_sender: Option<CrossbeamSender<Vec<i16>>>;
 
     let mut _speaker_playback_manager: Option<SpeakerPlayback> = None;
     let mut tcp_audio_output_module: Option<TcpAudioOutput> = None;
@@ -68,12 +66,9 @@ async fn main() -> Result<()> {
             openai_app_state_playback_sender = Some(ai_audio_tx_crossbeam);
         }
         "TCP_SPEAKER" => {
-            let target_addr = app_config
-                .udp_output_address // Assuming this ENV var is reused for target TCP address
-                .clone()
-                .expect(
-                    "TARGET_ADDRESS (from UDP_OUTPUT_ADDRESS) for ESP32 Speaker TCP output missing",
-                );
+            let target_addr = app_config.udp_output_address.clone().expect(
+                "TARGET_ADDRESS (from UDP_OUTPUT_ADDRESS) for ESP32 Speaker TCP output missing",
+            );
 
             info!(
                 "🔊 Using TCP audio output to ESP32 Speaker at: {}",
@@ -84,8 +79,8 @@ async fn main() -> Result<()> {
             tcp_module
                 .start_with_crossbeam_receiver(
                     ai_audio_rx_crossbeam,
-                    openai_integration::AI_OUTPUT_SAMPLE_RATE_HZ, // Use constant from openai_integration
-                    openai_integration::AI_OUTPUT_CHANNELS,       // Use constant
+                    openai_integration::AI_OUTPUT_SAMPLE_RATE_HZ,
+                    openai_integration::AI_OUTPUT_CHANNELS,
                 )
                 .await
                 .context("Failed to start TCP output (to ESP32 Speaker) with Crossbeam receiver")?;
@@ -113,7 +108,7 @@ async fn main() -> Result<()> {
         openai_app_state_playback_sender,
     )
     .await?;
-    let ai_app_state_clone: Arc<OpenAiAppState> = ai_client.state(); // <<< CHANGED
+    let ai_app_state_clone: Arc<OpenAiAppState> = ai_client.state();
 
     let mut audio_chunk_receiver_tokio: TokioReceiver<Vec<i16>> =
         audio_input_source.start_stream().await?;
@@ -121,7 +116,7 @@ async fn main() -> Result<()> {
     info!("🗣️  Assistant is now listening. Press Ctrl+C to exit.");
 
     let mut last_audio_sent_time = tokio::time::Instant::now();
-    const VAD_SILENCE_DURATION: Duration = Duration::from_secs(2); // Example: 2 seconds of silence for VAD
+    const VAD_SILENCE_DURATION: Duration = Duration::from_secs(2);
 
     loop {
         tokio::select! {
@@ -135,15 +130,12 @@ async fn main() -> Result<()> {
                 match audio_chunk_option {
                     Some(audio_chunk_vec) => {
                         if !audio_chunk_vec.is_empty() {
-                            // For OpenAI, we usually send chunks and then an explicit "end of audio"
                             debug!("➡️ Received MIC audio frame ({} samples). Forwarding to OpenAI.", audio_chunk_vec.len());
-                            // ai_app_state_clone.current_turn_text.lock().unwrap().clear(); // Clear previous response text
 
-                            // For continuous audio, we might not clear text until model turn complete
                             if let Err(e) = ai_client.send_audio_chunk(
                                 &audio_chunk_vec,
                                 app_config.audio_sample_rate,
-                            ).await { // OpenAI backend doesn't use channels arg in send_audio_chunk
+                            ).await {
                                 error!("🚨 Failed to send MIC audio to OpenAI: {}.", e);
                                 if matches!(e, gemini_live_api::error::GeminiError::SendError | gemini_live_api::error::GeminiError::ConnectionClosed) {
                                     error!("Connection lost. Shutting down.");
@@ -163,7 +155,6 @@ async fn main() -> Result<()> {
                 }
             }
 
-            // Simple VAD based on timeout since last audio chunk
             _ = tokio::time::sleep_until(last_audio_sent_time + VAD_SILENCE_DURATION), if tokio::time::Instant::now() >= last_audio_sent_time + VAD_SILENCE_DURATION => {
                 info!("[VAD] Silence detected for {}s. Sending audio_stream_end to OpenAI.", VAD_SILENCE_DURATION.as_secs());
                 if let Err(e) = ai_client.send_audio_stream_end().await {
@@ -173,20 +164,18 @@ async fn main() -> Result<()> {
                         break;
                     }
                 }
-                // Reset timer or handle state to prevent immediate re-trigger
-                last_audio_sent_time = tokio::time::Instant::now() + Duration::from_secs(1000); // Effectively disable until new audio
+                last_audio_sent_time = tokio::time::Instant::now() + Duration::from_secs(1000);
             }
 
 
             _ = ai_app_state_clone.turn_complete_signal.notified() => {
                 info!("[MainLoop] OpenAI turn complete signaled. Ready for new input.");
                 ai_app_state_clone.current_turn_text.lock().unwrap().clear();
-                last_audio_sent_time = tokio::time::Instant::now(); // Reset VAD timer
+                last_audio_sent_time = tokio::time::Instant::now();
             }
         }
     }
 
-    // --- Shutdown Sequence ---
     info!("🔌 Shutting down audio input source (mic/tcp_mic)...");
     if let Err(e) = audio_input_source.stop_stream().await {
         error!("🚨 Error stopping audio input source: {}", e);
@@ -206,14 +195,14 @@ async fn main() -> Result<()> {
         }
     }
 
-    info!("🤖 Closing OpenAI client connection..."); // <<< CHANGED
+    info!("🤖 Closing OpenAI client connection...");
     if !ai_client.is_closed() {
         // Check if already closed
         if let Err(e) = ai_client.close().await {
-            error!("🚨 Error closing OpenAI client: {}", e); // <<< CHANGED
+            error!("🚨 Error closing OpenAI client: {}", e);
         }
     }
 
-    info!("👋 OpenAI Voice Assistant shut down gracefully. Goodbye!"); // <<< CHANGED
+    info!("👋 OpenAI Voice Assistant shut down gracefully. Goodbye!");
     Ok(())
 }
