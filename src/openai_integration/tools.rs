@@ -274,7 +274,7 @@ async fn create_order(state: Arc<OpenAiAppState>, table_number: u32) -> Result<S
 
     info!(table_number, %url, "Successfully created new order: {text_response}");
     Ok(format!(
-        "Orded created succesfully for the table number: {table_number}"
+        "Orded created succesfully for the table number: {table_number}, the order id is: {text_response}"
     ))
 }
 
